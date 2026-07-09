@@ -128,20 +128,25 @@ function applyPricing(data, pricing) {
   for (const session of data.week.sessions) {
     const usdRates = resolveRates(pricing.usd, session.model);
     const creditRates = resolveRates(pricing.credits, session.model);
-    if (!usdRates || !creditRates) missing.add(session.model);
-    session.cost = { usd: priceUsage(session.usage, usdRates), credits: priceUsage(session.usage, creditRates) };
-    const day = String(session.timestamp || '').slice(0, 10);
-    const bucket = (data.week.daily || []).find((item) => item.date <= day && day <= item.end);
-    if (bucket) {
-      if (session.cost.usd !== null) bucket.cost.usd += session.cost.usd;
-      if (session.cost.credits !== null) bucket.cost.credits += session.cost.credits;
+    const sessionCost = { usd: 0, credits: 0 };
+    let sessionHasUsd = false;
+    let sessionHasCredits = false;
+    for (const item of session.iterations.length ? session.iterations : [session]) {
+      const itemUsdRates = resolveRates(pricing.usd, item.model) || usdRates;
+      const itemCreditRates = resolveRates(pricing.credits, item.model) || creditRates;
+      if (!itemUsdRates || !itemCreditRates) missing.add(item.model);
+      const cost = { usd: priceUsage(item.usage, itemUsdRates), credits: priceUsage(item.usage, itemCreditRates) };
+      if (item !== session) item.cost = cost;
+      if (cost.usd !== null) { sessionCost.usd += cost.usd; sessionHasUsd = true; }
+      if (cost.credits !== null) { sessionCost.credits += cost.credits; sessionHasCredits = true; }
+      const day = String(item.timestamp || '').slice(0, 10);
+      const bucket = (data.week.daily || []).find((candidate) => candidate.date <= day && day <= candidate.end);
+      if (bucket) {
+        if (cost.usd !== null) bucket.cost.usd += cost.usd;
+        if (cost.credits !== null) bucket.cost.credits += cost.credits;
+      }
     }
-    for (const iteration of session.iterations) {
-      iteration.cost = {
-        usd: priceUsage(iteration.usage, resolveRates(pricing.usd, iteration.model) || usdRates),
-        credits: priceUsage(iteration.usage, resolveRates(pricing.credits, iteration.model) || creditRates),
-      };
-    }
+    session.cost = { usd: sessionHasUsd ? sessionCost.usd : null, credits: sessionHasCredits ? sessionCost.credits : null };
     if (session.cost.usd !== null) { total.usd += session.cost.usd; hasUsd = true; }
     if (session.cost.credits !== null) { total.credits += session.cost.credits; hasCredits = true; }
   }

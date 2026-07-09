@@ -1,9 +1,10 @@
 {
-  "name": "codex-token-usage",
-  "displayName": "Codex Token Usage",
+  "name": "codex-token-usage-for-enterprises",
+  "displayName": "Codex Token Usage For Enterprises",
   "description": "A local dashboard for Codex token usage from session transcripts.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "DarkStyle",
+  "icon": "media/icon.png",
   "license": "MIT",
   "repository": {
     "type": "git",

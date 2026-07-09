@@ -23,7 +23,7 @@ The extension supports Linux, macOS, and Windows. In Remote SSH, WSL, or develop
 Install a packaged extension from the command line:
 
 ```sh
-code --install-extension codex-token-usage-0.1.0.vsix
+code --install-extension codex-token-usage-for-enterprises-0.1.1.vsix
 ```
 
 Alternatively, open the Extensions view, select **…**, and choose **Install from VSIX…**.

@@ -1,5 +1,5 @@
 const vscode = require('vscode');
-const { buildUsageData } = require('./usage');
+const { aggregateIterationsByUserMessage, buildUsageData } = require('./usage');
 const { applyPricing, loadPricing } = require('./pricing');
 
 class UsageViewProvider {
@@ -39,6 +39,7 @@ class UsageViewProvider {
         loadPricing(this.context.globalStorageUri.fsPath),
       ]);
       applyPricing(data, pricing);
+      for (const session of data.week.sessions) session.userMessages = aggregateIterationsByUserMessage(session.iterations);
       this.view.webview.postMessage({ type: 'data', data });
     } catch (error) {
       this.view?.webview.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
@@ -174,6 +175,7 @@ function dashboardHtml() {
   let sessionPage = 0;
   let selectedSessionId;
   let chartCurrency = 'credits';
+  let iterationGrouping = 'turns';
   function selectTab(tab) {
     activeTab = tab;
     document.querySelectorAll('[data-tab]').forEach((button) => button.setAttribute('aria-selected', String(button.dataset.tab === tab)));
@@ -193,12 +195,13 @@ function dashboardHtml() {
     if (selection.mode === 'month') rangeFields = '<label class="range-control">Month<input id="range-month" type="month" value="' + escapeHtml(selection.month) + '"></label>';
     else if (selection.mode === 'custom') rangeFields = '<label class="range-control">Start<input id="range-start" type="date" value="' + escapeHtml(selection.start) + '"></label><label class="range-control">End<input id="range-end" type="date" value="' + escapeHtml(selection.end) + '"></label>';
     else rangeFields = '<button class="range-button" data-week-shift="-7" title="Previous week">←</button><label class="range-control">Week containing<input id="range-anchor" type="date" value="' + escapeHtml(selection.anchor) + '"></label><button class="range-button" data-week-shift="7" title="Next week">→</button>';
-    const rangeControls = '<div class="range-toolbar"><label class="range-control">Range<select id="range-mode"><option value="week"' + (selection.mode === 'week' ? ' selected' : '') + '>Week</option><option value="month"' + (selection.mode === 'month' ? ' selected' : '') + '>Month</option><option value="custom"' + (selection.mode === 'custom' ? ' selected' : '') + '>Custom</option></select></label>' + rangeFields + '<button class="range-button primary" data-apply-range>Apply</button></div>';
+    const rangeControls = '<div class="range-toolbar"><label class="range-control">Range<select id="range-mode"><option value="week"' + (selection.mode === 'week' ? ' selected' : '') + '>Week</option><option value="month"' + (selection.mode === 'month' ? ' selected' : '') + '>Month</option><option value="custom"' + (selection.mode === 'custom' ? ' selected' : '') + '>Custom</option></select></label>' + rangeFields + '</div>';
     const sessionRows = pageSessions.map((session) => {
       const usage = session.usage;
       return '<tr><td><button class="session-link" data-session="' + escapeHtml(session.id) + '" title="Open iterations for ' + escapeHtml(session.id) + '">' + escapeHtml(session.id.slice(0, 8)) + '…</button></td><td class="table-title" title="' + escapeHtml(session.title) + '">' + escapeHtml(session.title) + '</td><td>' + escapeHtml(session.model) + '</td><td>' + full(freshInput(usage)) + '</td><td>' + full(usage.cached_tokens) + '</td><td>' + full(usage.output_tokens) + '</td><td>' + full(usage.input_tokens + usage.output_tokens) + '</td><td>' + credits(session.cost?.credits) + '</td><td>' + usd(session.cost?.usd) + '</td><td>' + date(session.timestamp) + ' ' + time(session.timestamp) + '</td></tr>';
     }).join('');
-    const iterationRows = (selected?.iterations || []).map((iteration) => {
+    const displayedIterations = selected ? (iterationGrouping === 'messages' ? selected.userMessages || [] : selected.iterations) : [];
+    const iterationRows = displayedIterations.map((iteration) => {
       const usage = iteration.usage;
       return '<tr><td>' + iteration.index + '</td><td>' + escapeHtml(iteration.trigger) + '</td><td class="table-title" title="' + escapeHtml(iteration.label) + '">' + escapeHtml(iteration.label) + '</td><td>' + escapeHtml(iteration.model) + '</td><td>' + full(freshInput(usage)) + '</td><td>' + full(usage.cached_tokens) + '</td><td>' + full(usage.output_tokens) + '</td><td>' + full(usage.reasoning_tokens) + '</td><td>' + full(usage.input_tokens + usage.output_tokens) + '</td><td>' + credits(iteration.cost?.credits) + '</td><td>' + usd(iteration.cost?.usd) + '</td><td>' + time(iteration.timestamp) + '</td></tr>';
     }).join('');
@@ -209,6 +212,7 @@ function dashboardHtml() {
     app.innerHTML = '<header class="top"><div><div class="eyebrow">Local telemetry</div><h1>Codex usage</h1><div class="subtle">Your token pulse, without the noise.</div></div><button class="icon-button" aria-label="Refresh usage" title="Refresh" onclick="vscode.postMessage({type:\\'refresh\\'})">↻</button></header><nav class="tabs" role="tablist" aria-label="Usage views"><button class="tab" role="tab" data-tab="overview">Overview</button><button class="tab" role="tab" data-tab="sessions">Sessions (' + data.meta.sessionCount + ')</button><button class="tab" role="tab" data-tab="iterations">Iterations</button></nav>' + rangeControls + '<div class="range">' + date(data.week.start) + ' – ' + date(data.week.end) + ' <span class="muted">· UTC</span></div><div class="tab-panel" data-panel="overview" role="tabpanel"><section class="cards">' + metric('Fresh input', freshInput(total), 'input not served from cache', '#4de1d5') + metric('Output', total.output_tokens, 'assistant tokens', '#a88bff') + metric('Cached input', total.cached_tokens, 'provider cache hits', '#ef8dca') + metric('Reasoning', total.reasoning_tokens, 'inside output', '#ffbd72') + metric('Credits', credits(data.pricing.credits), 'official Codex token rates', '#7ed7ff') + metric('USD', usd(data.pricing.usd), 'standard API rates', '#8fe388') + '</section><section class="chart"><div class="section-title"><span>Activity</span><span class="muted">' + fmt(total.input_tokens + total.output_tokens) + ' total</span></div><div class="chart-scroll"><div class="chart-grid" style="grid-template-columns:repeat(' + data.week.daily.length + ',minmax(28px,1fr))">' + chart + '</div></div></section></div><div class="tab-panel" data-panel="sessions" role="tabpanel"><section class="sessions"><div class="sessions-head section-title"><span>Sessions</span><span class="muted">' + data.meta.sessionCount + '</span></div>' + sessionTable + '</section></div><div class="tab-panel" data-panel="iterations" role="tabpanel"><section class="sessions"><div class="sessions-head section-title"><span>Iterations' + (selected ? ' · ' + escapeHtml(selected.title) : '') + '</span><span class="muted">' + (selected?.iterations?.length || 0) + ' model calls</span></div>' + iterationTable + '</section></div><div class="footer">' + escapeHtml(data.meta.codexHome) + (data.pricing.missingModels.length ? ' · Pricing unavailable for: ' + escapeHtml(data.pricing.missingModels.join(', ')) : '') + (data.meta.malformedFiles ? ' · Some incomplete transcript lines were skipped.' : '') + '</div>';
     app.querySelector('.chart-grid').style.gridTemplateColumns = 'repeat(' + data.week.daily.length + ', minmax(0, 1fr))';
     app.querySelector('.chart .section-title .muted').outerHTML = '<div class="chart-toggle" aria-label="Chart currency"><button data-chart-currency="credits" aria-pressed="' + (chartCurrency === 'credits') + '">Credits</button><button data-chart-currency="usd" aria-pressed="' + (chartCurrency === 'usd') + '">USD</button></div>';
+    app.querySelector('[data-panel="iterations"] .section-title .muted').outerHTML = '<div class="chart-toggle" aria-label="Session detail grouping"><button data-iteration-grouping="turns" aria-pressed="' + (iterationGrouping === 'turns') + '">Turns</button><button data-iteration-grouping="messages" aria-pressed="' + (iterationGrouping === 'messages') + '">User messages</button></div>';
     app.querySelector('.footer').remove();
     selectTab(activeTab);
   }
@@ -217,16 +221,13 @@ function dashboardHtml() {
     if (tab) selectTab(tab.dataset.tab);
     const currency = event.target.closest('[data-chart-currency]');
     if (currency) { chartCurrency = currency.dataset.chartCurrency; render(currentData); }
+    const grouping = event.target.closest('[data-iteration-grouping]');
+    if (grouping) { iterationGrouping = grouping.dataset.iterationGrouping; render(currentData); }
     const weekShift = event.target.closest('[data-week-shift]');
     if (weekShift) {
       const anchor = new Date(document.getElementById('range-anchor').value + 'T00:00:00Z');
       anchor.setUTCDate(anchor.getUTCDate() + Number(weekShift.dataset.weekShift));
       vscode.postMessage({ type: 'range', range: { mode: 'week', anchor: anchor.toISOString().slice(0, 10) } });
-    }
-    if (event.target.closest('[data-apply-range]')) {
-      const mode = document.getElementById('range-mode').value;
-      const range = mode === 'month' ? { mode, month: document.getElementById('range-month').value } : mode === 'custom' ? { mode, start: document.getElementById('range-start').value, end: document.getElementById('range-end').value } : { mode, anchor: document.getElementById('range-anchor').value };
-      vscode.postMessage({ type: 'range', range });
     }
     const session = event.target.closest('[data-session]');
     if (session) { selectedSessionId = session.dataset.session; activeTab = 'iterations'; render(currentData); }
@@ -234,10 +235,12 @@ function dashboardHtml() {
     if (page && !page.disabled) { sessionPage = Number(page.dataset.page); render(currentData); }
   });
   document.addEventListener('change', (event) => {
-    if (event.target.id !== 'range-mode') return;
-    const mode = event.target.value;
-    currentData.week.selection = mode === 'month' ? { mode, month: currentData.week.start.slice(0, 7) } : mode === 'custom' ? { mode, start: currentData.week.start, end: currentData.week.end } : { mode, anchor: currentData.week.start };
-    render(currentData);
+    const mode = document.getElementById('range-mode')?.value;
+    if (!mode || !['range-mode', 'range-month', 'range-start', 'range-end', 'range-anchor'].includes(event.target.id)) return;
+    const range = event.target.id === 'range-mode'
+      ? mode === 'month' ? { mode, month: currentData.week.start.slice(0, 7) } : mode === 'custom' ? { mode, start: currentData.week.start, end: currentData.week.end } : { mode, anchor: currentData.week.start }
+      : mode === 'month' ? { mode, month: document.getElementById('range-month').value } : mode === 'custom' ? { mode, start: document.getElementById('range-start').value, end: document.getElementById('range-end').value } : { mode, anchor: document.getElementById('range-anchor').value };
+    if (mode !== 'custom' || range.start && range.end && range.start <= range.end) vscode.postMessage({ type: 'range', range });
   });
   window.addEventListener('message', (event) => { if (event.data.type === 'progress' && event.data.total) { const percent = Math.round(event.data.completed / event.data.total * 100); const remaining = event.data.total - event.data.completed; document.getElementById('progress-label').textContent = 'Processed ' + event.data.completed + ' · Remaining ' + remaining + ' · Total ' + event.data.total; document.getElementById('progress-count').textContent = event.data.completed + ' / ' + event.data.total + ' (' + percent + '%)'; const bar = document.getElementById('progress-bar'); bar.classList.add('determinate'); bar.style.setProperty('--progress', percent + '%'); bar.setAttribute('aria-valuenow', percent); bar.setAttribute('aria-valuetext', event.data.completed + ' of ' + event.data.total + ' sessions processed'); } if (event.data.type === 'data') render(event.data.data); if (event.data.type === 'error') app.innerHTML = '<div class="error">Could not read Codex usage: ' + escapeHtml(event.data.message) + '</div>'; });
   vscode.postMessage({type: 'ready'});

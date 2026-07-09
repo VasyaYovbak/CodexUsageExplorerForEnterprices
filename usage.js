@@ -26,7 +26,7 @@ function addUsage(target, source) {
 }
 
 function emptyUsage() {
-  return { input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 };
+  return { input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, cached_writes: null };
 }
 
 function expandHome(value) {
@@ -149,6 +149,31 @@ function parseTranscript(file, titles) {
   };
 }
 
+function aggregateIterationsByUserMessage(iterations) {
+  const groups = [];
+  for (const iteration of iterations) {
+    if (!groups.length || iteration.trigger === 'User message') {
+      groups.push({
+        index: groups.length + 1,
+        timestamp: iteration.timestamp,
+        trigger: 'User message',
+        label: iteration.label,
+        model: iteration.model,
+        usage: emptyUsage(),
+        cost: { usd: null, credits: null },
+      });
+    }
+    const group = groups.at(-1);
+    group.timestamp = iteration.timestamp;
+    if (group.model !== iteration.model) group.model = 'Multiple';
+    addUsage(group.usage, iteration.usage);
+    for (const currency of ['usd', 'credits']) {
+      if (iteration.cost?.[currency] != null) group.cost[currency] = (group.cost[currency] || 0) + iteration.cost[currency];
+    }
+  }
+  return groups;
+}
+
 function mondayUtc(date) {
   const utcDay = date.getUTCDay();
   const daysSinceMonday = (utcDay + 6) % 7;
@@ -263,12 +288,22 @@ async function buildUsageData(configuredHome, now = new Date(), onProgress, sele
     if (!previous || new Date(session.timestamp) > new Date(previous.timestamp)) byId.set(session.id, session);
   }
 
-  const sessions = [...byId.values()].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  const sessions = [...byId.values()];
   const { startMs, endMs, selection: normalizedSelection } = resolveRange(now, selection);
-  const rangeSessions = sessions.filter((session) => {
+  const rangeSessions = sessions.map((session) => {
+    const iterations = session.iterations.filter((iteration) => {
+      const time = new Date(iteration.timestamp).getTime();
+      return Number.isFinite(time) && time >= startMs && time < endMs;
+    });
+    if (iterations.length) {
+      const usage = emptyUsage();
+      for (const iteration of iterations) addUsage(usage, iteration.usage);
+      return { ...session, timestamp: iterations.at(-1).timestamp, usage, iterations };
+    }
+    if (session.iterations.length) return null;
     const time = new Date(session.timestamp).getTime();
-    return Number.isFinite(time) && time >= startMs && time < endMs;
-  });
+    return Number.isFinite(time) && time >= startMs && time < endMs ? session : null;
+  }).filter(Boolean).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   const rangeTotal = emptyUsage();
   const dayCount = (endMs - startMs) / 86400000;
   const showDays = dayCount <= 7;
@@ -286,9 +321,11 @@ async function buildUsageData(configuredHome, now = new Date(), onProgress, sele
   });
   for (const session of rangeSessions) {
     addUsage(rangeTotal, session.usage);
-    const dayOffset = Math.floor((new Date(session.timestamp).getTime() - startMs) / 86400000);
-    const bucket = daily[showDays ? dayOffset : Math.floor(dayOffset / 7)];
-    if (bucket) addUsage(bucket.usage, session.usage);
+    for (const item of session.iterations.length ? session.iterations : [session]) {
+      const dayOffset = Math.floor((new Date(item.timestamp).getTime() - startMs) / 86400000);
+      const bucket = daily[showDays ? dayOffset : Math.floor(dayOffset / 7)];
+      if (bucket) addUsage(bucket.usage, item.usage);
+    }
   }
 
   return {
@@ -304,4 +341,4 @@ async function buildUsageData(configuredHome, now = new Date(), onProgress, sele
   };
 }
 
-module.exports = { buildUsageData, mondayUtc, normalizeUsage, parseTranscript, resolveRange };
+module.exports = { aggregateIterationsByUserMessage, buildUsageData, mondayUtc, normalizeUsage, parseTranscript, resolveRange };
