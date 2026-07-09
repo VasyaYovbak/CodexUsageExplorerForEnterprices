@@ -1,0 +1,7 @@
+.codex/**
+.opencode/**
+.smart-explore-mcp-cache/**
+proxy-logic/**
+test/**
+codex-token-usage-report.md
+*.tgz

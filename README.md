@@ -1,0 +1,63 @@
+# Codex Token Usage
+
+A local VS Code dashboard for inspecting Codex token usage and estimated costs from session transcripts.
+
+## Features
+
+- Weekly, monthly, and custom UTC date ranges
+- Session and per-model-call usage breakdowns
+- Fresh input, cached input, output, and reasoning token totals
+- Credit and standard API USD estimates
+- Daily or weekly activity bars with a Credits/USD toggle
+- Local transcript processing with no telemetry collection
+
+## Requirements
+
+- Desktop VS Code 1.85 or newer
+- Codex session data in `~/.codex`, or another configured directory
+
+The extension supports Linux, macOS, and Windows. In Remote SSH, WSL, or development containers, it reads Codex data from the remote environment where the extension runs.
+
+## Installation
+
+Install a packaged extension from the command line:
+
+```sh
+code --install-extension codex-token-usage-0.1.0.vsix
+```
+
+Alternatively, open the Extensions view, select **…**, and choose **Install from VSIX…**.
+
+## Configuration
+
+The default Codex data directory is `~/.codex`. To use another location, set:
+
+```json
+{
+  "codexUsage.codexHome": "/path/to/.codex"
+}
+```
+
+You can also run **Codex Usage: Configure Codex Home** from the Command Palette.
+
+## Privacy and pricing
+
+Session transcripts are read and processed locally. The extension fetches public OpenAI pricing pages to calculate estimates and caches those rates locally. Estimates may differ from billed amounts.
+
+## Development
+
+Run the checks with:
+
+```sh
+npm test
+```
+
+Create a VSIX package with:
+
+```sh
+npx @vscode/vsce package
+```
+
+## License
+
+MIT License

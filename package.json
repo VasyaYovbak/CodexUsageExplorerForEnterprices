@@ -1,0 +1,60 @@
+{
+  "name": "codex-token-usage",
+  "displayName": "Codex Token Usage",
+  "description": "A local dashboard for Codex token usage from session transcripts.",
+  "version": "0.1.0",
+  "publisher": "DarkStyle",
+  "license": "MIT",
+  "scripts": {
+    "test": "node test/usage.test.js && node test/pricing.test.js"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onView:codexUsage.dashboard",
+    "onCommand:codexUsage.refresh",
+    "onCommand:codexUsage.openSettings"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexUsage.refresh",
+        "title": "Codex Usage: Refresh"
+      },
+      {
+        "command": "codexUsage.openSettings",
+        "title": "Codex Usage: Configure Codex Home"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Usage",
+      "properties": {
+        "codexUsage.codexHome": {
+          "type": "string",
+          "default": "~/.codex",
+          "description": "Codex data directory containing sessions and archived_sessions."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexUsage",
+          "title": "Codex Usage",
+          "icon": "media/codex.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexUsage": [
+        {
+          "id": "codexUsage.dashboard",
+          "name": "Dashboard",
+          "type": "webview"
+        }
+      ]
+    }
+  }
+}
