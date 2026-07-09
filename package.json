@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "DarkStyle",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VasyaYovbak/CodexUsageExplorerForEnterprices.git"
+  },
   "scripts": {
     "test": "node test/usage.test.js && node test/pricing.test.js"
   },
