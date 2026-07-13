@@ -120,37 +120,42 @@ async function loadPricing(cacheDirectory) {
 }
 
 function applyPricing(data, pricing) {
-  const total = { usd: 0, credits: 0 };
-  for (const bucket of data.week.daily || []) bucket.cost = { usd: 0, credits: 0 };
-  let hasUsd = false;
-  let hasCredits = false;
   const missing = new Set();
-  for (const session of data.week.sessions) {
-    const usdRates = resolveRates(pricing.usd, session.model);
-    const creditRates = resolveRates(pricing.credits, session.model);
-    const sessionCost = { usd: 0, credits: 0 };
-    let sessionHasUsd = false;
-    let sessionHasCredits = false;
-    for (const item of session.iterations.length ? session.iterations : [session]) {
-      const itemUsdRates = resolveRates(pricing.usd, item.model) || usdRates;
-      const itemCreditRates = resolveRates(pricing.credits, item.model) || creditRates;
-      if (!itemUsdRates || !itemCreditRates) missing.add(item.model);
-      const cost = { usd: priceUsage(item.usage, itemUsdRates), credits: priceUsage(item.usage, itemCreditRates) };
-      if (item !== session) item.cost = cost;
-      if (cost.usd !== null) { sessionCost.usd += cost.usd; sessionHasUsd = true; }
-      if (cost.credits !== null) { sessionCost.credits += cost.credits; sessionHasCredits = true; }
-      const day = String(item.timestamp || '').slice(0, 10);
-      const bucket = (data.week.daily || []).find((candidate) => candidate.date <= day && day <= candidate.end);
-      if (bucket) {
-        if (cost.usd !== null) bucket.cost.usd += cost.usd;
-        if (cost.credits !== null) bucket.cost.credits += cost.credits;
+  const pricePeriod = (period) => {
+    const total = { usd: 0, credits: 0 };
+    for (const bucket of period.daily || []) bucket.cost = { usd: 0, credits: 0 };
+    let hasUsd = false;
+    let hasCredits = false;
+    for (const session of period.sessions) {
+      const usdRates = resolveRates(pricing.usd, session.model);
+      const creditRates = resolveRates(pricing.credits, session.model);
+      const sessionCost = { usd: 0, credits: 0 };
+      let sessionHasUsd = false;
+      let sessionHasCredits = false;
+      for (const item of session.iterations.length ? session.iterations : [session]) {
+        const itemUsdRates = resolveRates(pricing.usd, item.model) || usdRates;
+        const itemCreditRates = resolveRates(pricing.credits, item.model) || creditRates;
+        if (!itemUsdRates || !itemCreditRates) missing.add(item.model);
+        const cost = { usd: priceUsage(item.usage, itemUsdRates), credits: priceUsage(item.usage, itemCreditRates) };
+        if (item !== session) item.cost = cost;
+        if (cost.usd !== null) { sessionCost.usd += cost.usd; sessionHasUsd = true; }
+        if (cost.credits !== null) { sessionCost.credits += cost.credits; sessionHasCredits = true; }
+        const day = String(item.timestamp || '').slice(0, 10);
+        const bucket = (period.daily || []).find((candidate) => candidate.date <= day && day <= candidate.end);
+        if (bucket) {
+          if (cost.usd !== null) bucket.cost.usd += cost.usd;
+          if (cost.credits !== null) bucket.cost.credits += cost.credits;
+        }
       }
+      session.cost = { usd: sessionHasUsd ? sessionCost.usd : null, credits: sessionHasCredits ? sessionCost.credits : null };
+      if (session.cost.usd !== null) { total.usd += session.cost.usd; hasUsd = true; }
+      if (session.cost.credits !== null) { total.credits += session.cost.credits; hasCredits = true; }
     }
-    session.cost = { usd: sessionHasUsd ? sessionCost.usd : null, credits: sessionHasCredits ? sessionCost.credits : null };
-    if (session.cost.usd !== null) { total.usd += session.cost.usd; hasUsd = true; }
-    if (session.cost.credits !== null) { total.credits += session.cost.credits; hasCredits = true; }
-  }
-  data.pricing = { usd: hasUsd ? total.usd : null, credits: hasCredits ? total.credits : null, sources: pricing.sources, missingModels: [...missing] };
+    return { usd: hasUsd ? total.usd : null, credits: hasCredits ? total.credits : null };
+  };
+  const total = pricePeriod(data.week);
+  if (data.today) data.today.cost = pricePeriod(data.today);
+  data.pricing = { ...total, sources: pricing.sources, missingModels: [...missing] };
   return data;
 }
 

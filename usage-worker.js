@@ -14,8 +14,8 @@ parentPort.on('message', (message) => {
   if (message.type !== 'parse') return;
 
   try {
-    parentPort.postMessage({ session: parseTranscript(message.file, titles) });
+    parentPort.postMessage({ file: message.file, session: parseTranscript(message.file, titles) });
   } catch (error) {
-    parentPort.postMessage({ error: error instanceof Error ? error.message : String(error) });
+    parentPort.postMessage({ file: message.file, error: error instanceof Error ? error.message : String(error) });
   }
 });

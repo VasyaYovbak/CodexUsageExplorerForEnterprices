@@ -1,9 +1,11 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const { Worker } = require('worker_threads');
 
 const USAGE_KEYS = ['input_tokens', 'output_tokens', 'cached_tokens', 'reasoning_tokens'];
+const transcriptCache = new Map();
 
 function number(value) {
   return Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
@@ -29,9 +31,29 @@ function emptyUsage() {
   return { input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, cached_writes: null };
 }
 
+function usageDelta(current, previous = emptyUsage()) {
+  const delta = emptyUsage();
+  for (const key of USAGE_KEYS) delta[key] = Math.max(0, current[key] - previous[key]);
+  return delta;
+}
+
 function expandHome(value) {
   if (!value || value === '~') return os.homedir();
   return value.startsWith('~/') ? path.join(os.homedir(), value.slice(2)) : value;
+}
+
+function discoverCodexHomes(configuredHome) {
+  const candidates = [expandHome(configuredHome || '~/.codex'), path.join(os.homedir(), '.codex')];
+  if (process.platform === 'linux' && (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)) {
+    try {
+      const windowsHome = execFileSync('cmd.exe', ['/d', '/s', '/c', 'echo %USERPROFILE%'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
+      const wslWindowsHome = execFileSync('wslpath', ['-u', windowsHome], { encoding: 'utf8' }).trim();
+      candidates.push(path.join(wslWindowsHome, '.codex'));
+    } catch {
+      // WSL interop may be disabled; the configured and Linux homes still work.
+    }
+  }
+  return [...new Set(candidates.map((home) => path.resolve(home)))].filter((home, index) => index === 0 || fs.existsSync(home));
 }
 
 function walkJsonl(directory) {
@@ -72,6 +94,7 @@ function parseTranscript(file, titles) {
   let lastToken;
   let tokenTimestamp;
   let model;
+  let previousTotalUsage;
   let malformedLines = 0;
   const iterations = [];
   const toolNames = new Map();
@@ -113,7 +136,10 @@ function parseTranscript(file, titles) {
       lastToken = payload.info;
       tokenTimestamp = record.timestamp || tokenTimestamp;
       model = payload.model || model;
-      if (lastToken.last_token_usage) {
+      const cumulativeUsage = lastToken.total_token_usage ? normalizeUsage(lastToken.total_token_usage) : undefined;
+      const iterationUsage = cumulativeUsage ? usageDelta(cumulativeUsage, previousTotalUsage) : normalizeUsage(lastToken.last_token_usage);
+      if (cumulativeUsage) previousTotalUsage = cumulativeUsage;
+      if (USAGE_KEYS.some((key) => iterationUsage[key])) {
       // baza: Codex does not link usage events to their input event. Transcript
       // order lets us carry a tool result to the next LLM call; use provider
       // call IDs instead if Codex exposes that relationship later.
@@ -124,7 +150,7 @@ function parseTranscript(file, titles) {
           trigger: iterationTrigger?.type || 'Model call',
           label: iterationTrigger?.label || 'Model call',
           model: model || 'Codex',
-          usage: normalizeUsage(lastToken.last_token_usage),
+          usage: iterationUsage,
         });
       }
       trigger = trigger ? pendingToolTrigger : undefined;
@@ -218,7 +244,7 @@ function resolveRange(now, selection = {}) {
 }
 
 function parseFilesInParallel(files, titles, onProgress) {
-  if (!files.length) return Promise.resolve({ sessions: [], malformedFiles: 0 });
+  if (!files.length) return Promise.resolve({ sessions: [], malformedFiles: 0, results: [] });
   const cpuCount = os.availableParallelism ? os.availableParallelism() : os.cpus().length;
   const workerCount = Math.min(Math.max(cpuCount, 1), files.length, 8);
   const titleEntries = [...titles.entries()];
@@ -226,6 +252,7 @@ function parseFilesInParallel(files, titles, onProgress) {
   return new Promise((resolve, reject) => {
     const workers = [];
     const sessions = [];
+    const results = [];
     let nextFile = 0;
     let completed = 0;
     let malformedFiles = 0;
@@ -241,7 +268,7 @@ function parseFilesInParallel(files, titles, onProgress) {
     const finish = () => {
       if (settled || completed !== files.length) return;
       settled = true;
-      Promise.all(workers.map((worker) => worker.terminate())).then(() => resolve({ sessions, malformedFiles }));
+      Promise.all(workers.map((worker) => worker.terminate())).then(() => resolve({ sessions, malformedFiles, results }));
     };
     const assign = (worker) => {
       if (settled) return;
@@ -257,6 +284,7 @@ function parseFilesInParallel(files, titles, onProgress) {
       workers.push(worker);
       worker.postMessage({ type: 'init', titles: titleEntries });
       worker.on('message', (result) => {
+        results.push(result);
         if (result.error) malformedFiles += 1;
         if (result.session) sessions.push(result.session);
         completed += 1;
@@ -273,24 +301,8 @@ function parseFilesInParallel(files, titles, onProgress) {
   });
 }
 
-async function buildUsageData(configuredHome, now = new Date(), onProgress, selection) {
-  const codexHome = expandHome(configuredHome || '~/.codex');
-  const titles = loadSessionIndex(codexHome);
-  const files = [
-    ...walkJsonl(path.join(codexHome, 'sessions')),
-    ...walkJsonl(path.join(codexHome, 'archived_sessions')),
-  ];
-  const parsed = await parseFilesInParallel(files, titles, onProgress);
-  const byId = new Map();
-  for (const session of parsed.sessions) {
-    if (session.malformedLines) parsed.malformedFiles += 1;
-    const previous = byId.get(session.id);
-    if (!previous || new Date(session.timestamp) > new Date(previous.timestamp)) byId.set(session.id, session);
-  }
-
-  const sessions = [...byId.values()];
-  const { startMs, endMs, selection: normalizedSelection } = resolveRange(now, selection);
-  const rangeSessions = sessions.map((session) => {
+function sessionsInRange(sessions, startMs, endMs) {
+  return sessions.map((session) => {
     const iterations = session.iterations.filter((iteration) => {
       const time = new Date(iteration.timestamp).getTime();
       return Number.isFinite(time) && time >= startMs && time < endMs;
@@ -304,6 +316,38 @@ async function buildUsageData(configuredHome, now = new Date(), onProgress, sele
     const time = new Date(session.timestamp).getTime();
     return Number.isFinite(time) && time >= startMs && time < endMs ? session : null;
   }).filter(Boolean).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+}
+
+async function buildUsageData(configuredHome, now = new Date(), onProgress, selection) {
+  const codexHomes = (Array.isArray(configuredHome) ? configuredHome : [configuredHome || '~/.codex']).map(expandHome);
+  const titles = new Map(codexHomes.flatMap((home) => [...loadSessionIndex(home)]));
+  const files = [...new Set(codexHomes.flatMap((home) => [
+    ...walkJsonl(path.join(home, 'sessions')),
+    ...walkJsonl(path.join(home, 'archived_sessions')),
+  ]))];
+  const signatures = new Map(files.map((file) => {
+    const stat = fs.statSync(file);
+    return [file, `${stat.mtimeMs}:${stat.size}`];
+  }));
+  const changedFiles = files.filter((file) => transcriptCache.get(file)?.signature !== signatures.get(file));
+  const changed = new Set(changedFiles);
+  const cachedResults = files.filter((file) => !changed.has(file)).map((file) => transcriptCache.get(file).result);
+  for (const file of transcriptCache.keys()) if (!signatures.has(file)) transcriptCache.delete(file);
+  const parsed = await parseFilesInParallel(changedFiles, titles, onProgress);
+  for (const result of parsed.results) transcriptCache.set(result.file, { signature: signatures.get(result.file), result });
+  parsed.sessions.unshift(...cachedResults.map((result) => result.session).filter(Boolean));
+  parsed.malformedFiles += cachedResults.filter((result) => result.error).length;
+  const byId = new Map();
+  for (const session of parsed.sessions) {
+    if (titles.has(session.id)) session.title = titles.get(session.id);
+    if (session.malformedLines) parsed.malformedFiles += 1;
+    const previous = byId.get(session.id);
+    if (!previous || new Date(session.timestamp) > new Date(previous.timestamp)) byId.set(session.id, session);
+  }
+
+  const sessions = [...byId.values()];
+  const { startMs, endMs, selection: normalizedSelection } = resolveRange(now, selection);
+  const rangeSessions = sessionsInRange(sessions, startMs, endMs);
   const rangeTotal = emptyUsage();
   const dayCount = (endMs - startMs) / 86400000;
   const showDays = dayCount <= 7;
@@ -328,7 +372,16 @@ async function buildUsageData(configuredHome, now = new Date(), onProgress, sele
     }
   }
 
+  const todayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const todaySessions = sessionsInRange(sessions, todayStartMs, todayStartMs + 86400000);
+  const todayTotal = emptyUsage();
+  for (const session of todaySessions) addUsage(todayTotal, session.usage);
+  const latestSession = todaySessions.find((session) => session.iterations.length);
+  const latestTurn = latestSession?.iterations.at(-1) || null;
+  if (latestTurn) Object.assign(latestTurn, { sessionId: latestSession.id, sessionTitle: latestSession.title });
+
   return {
+    today: { date: dayKey(now), total: todayTotal, sessions: todaySessions, latestTurn },
     week: {
       start: new Date(startMs).toISOString().slice(0, 10),
       end: new Date(endMs - 1).toISOString().slice(0, 10),
@@ -337,8 +390,8 @@ async function buildUsageData(configuredHome, now = new Date(), onProgress, sele
       daily,
       sessions: rangeSessions,
     },
-    meta: { codexHome, sessionCount: rangeSessions.length, malformedFiles: parsed.malformedFiles },
+    meta: { codexHome: codexHomes[0], codexHomes, sessionCount: rangeSessions.length, malformedFiles: parsed.malformedFiles },
   };
 }
 
-module.exports = { aggregateIterationsByUserMessage, buildUsageData, mondayUtc, normalizeUsage, parseTranscript, resolveRange };
+module.exports = { aggregateIterationsByUserMessage, buildUsageData, discoverCodexHomes, mondayUtc, normalizeUsage, parseTranscript, resolveRange };

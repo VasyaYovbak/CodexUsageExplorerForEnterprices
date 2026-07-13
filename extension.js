@@ -1,11 +1,16 @@
 const vscode = require('vscode');
-const { aggregateIterationsByUserMessage, buildUsageData } = require('./usage');
+const { aggregateIterationsByUserMessage, buildUsageData, discoverCodexHomes } = require('./usage');
 const { applyPricing, loadPricing } = require('./pricing');
 
 class UsageViewProvider {
-  constructor(context) {
+  constructor(context, statusBar) {
     this.context = context;
+    this.statusBar = statusBar;
     this.view = undefined;
+  }
+
+  showDaily() {
+    this.view?.webview.postMessage({ type: 'tab', tab: 'daily' });
   }
 
   resolveWebviewView(view) {
@@ -27,36 +32,65 @@ class UsageViewProvider {
   }
 
   async refresh() {
-    if (!this.view || this.refreshing) return;
+    if (this.refreshing) {
+      this.refreshPending = true;
+      return;
+    }
     this.refreshing = true;
     const codexHome = vscode.workspace.getConfiguration('codexUsage').get('codexHome', '~/.codex');
     try {
-      this.view.webview.postMessage({ type: 'progress', completed: 0, total: 0 });
+      this.view?.webview.postMessage({ type: 'progress', completed: 0, total: 0 });
       const [data, pricing] = await Promise.all([
-        buildUsageData(codexHome, new Date(), (completed, total) => {
+        buildUsageData(discoverCodexHomes(codexHome), new Date(), (completed, total) => {
           this.view?.webview.postMessage({ type: 'progress', completed, total });
         }, this.range),
         loadPricing(this.context.globalStorageUri.fsPath),
       ]);
       applyPricing(data, pricing);
-      for (const session of data.week.sessions) session.userMessages = aggregateIterationsByUserMessage(session.iterations);
-      this.view.webview.postMessage({ type: 'data', data });
+      for (const session of [...data.week.sessions, ...data.today.sessions]) session.userMessages = aggregateIterationsByUserMessage(session.iterations);
+      const statusNumber = (value) => value == null ? '—' : new Intl.NumberFormat('en-US', { maximumFractionDigits: value < .01 ? 4 : 2 }).format(value);
+      this.statusBar.text = `Codex today: ${statusNumber(data.today.cost.credits)} credits · ${data.today.cost.usd == null ? '—' : `$${statusNumber(data.today.cost.usd)}`}`;
+      this.view?.webview.postMessage({ type: 'data', data });
     } catch (error) {
       this.view?.webview.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
     } finally {
       this.refreshing = false;
+      if (this.refreshPending) {
+        this.refreshPending = false;
+        this.refresh();
+      }
     }
   }
 }
 
 function activate(context) {
-  const provider = new UsageViewProvider(context);
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBar.name = 'Codex daily usage';
+  statusBar.text = 'Codex today: loading…';
+  statusBar.tooltip = 'Open today’s Codex usage';
+  statusBar.command = 'codexUsage.openDaily';
+  statusBar.show();
+  const provider = new UsageViewProvider(context, statusBar);
   context.subscriptions.push(
+    statusBar,
     vscode.window.registerWebviewViewProvider('codexUsage.dashboard', provider),
     vscode.commands.registerCommand('codexUsage.refresh', () => provider.refresh()),
+    vscode.commands.registerCommand('codexUsage.openDaily', async () => {
+      await vscode.commands.executeCommand('codexUsage.dashboard.focus');
+      provider.showDaily();
+    }),
     vscode.commands.registerCommand('codexUsage.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:local.codex-token-usage')),
   );
-  const timer = setInterval(() => provider.refresh(), 60_000);
+  const codexHome = vscode.workspace.getConfiguration('codexUsage').get('codexHome', '~/.codex');
+  for (const home of discoverCodexHomes(codexHome)) {
+    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(home, '**/*.jsonl'));
+    watcher.onDidChange(() => provider.refresh());
+    watcher.onDidCreate(() => provider.refresh());
+    watcher.onDidDelete(() => provider.refresh());
+    context.subscriptions.push(watcher);
+  }
+  provider.refresh();
+  const timer = setInterval(() => { if (provider.view?.visible) provider.refresh(); }, 3_000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
 }
 
@@ -92,6 +126,7 @@ function dashboardHtml() {
   .tab-panel[data-panel="overview"]:not([hidden]) { flex: 1; display: flex; flex-direction: column; }
   .range { margin: 0 0 15px; color: var(--muted); font-size: 12px; }
   .range-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; margin-bottom: 11px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: rgba(21,28,45,.78); }
+  .range[hidden], .range-toolbar[hidden] { display: none; }
   .range-control { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
   select, input { min-height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--panel-2); font: inherit; }
   .range-button { min-height: 30px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
@@ -169,17 +204,21 @@ function dashboardHtml() {
   const credits = (value) => value == null ? '—' : value.toFixed(value < .01 ? 4 : 2);
   const metric = (label, value, note, color) => '<div class="card"><div class="card-label"><span>' + label + '</span><span class="dot" style="background:' + color + ';box-shadow:0 0 10px ' + color + '"></span></div><div class="card-value">' + (typeof value === 'string' ? value : fmt(value)) + '</div><div class="card-note">' + note + '</div></div>';
   const freshInput = (usage) => Math.max(0, usage.input_tokens - usage.cached_tokens);
+  const sessionRow = (session) => { const usage = session.usage; return '<tr><td><button class="session-link" data-session="' + escapeHtml(session.id) + '" title="Open iterations for ' + escapeHtml(session.id) + '">' + escapeHtml(session.id.slice(0, 8)) + '…</button></td><td class="table-title" title="' + escapeHtml(session.title) + '">' + escapeHtml(session.title) + '</td><td>' + escapeHtml(session.model) + '</td><td>' + full(freshInput(usage)) + '</td><td>' + full(usage.cached_tokens) + '</td><td>' + full(usage.output_tokens) + '</td><td>' + full(usage.input_tokens + usage.output_tokens) + '</td><td>' + credits(session.cost?.credits) + '</td><td>' + usd(session.cost?.usd) + '</td><td>' + date(session.timestamp) + ' ' + time(session.timestamp) + '</td></tr>'; };
   const PAGE_SIZE = 10;
-  let activeTab = 'overview';
+  let activeTab = 'daily';
   let currentData;
   let sessionPage = 0;
   let selectedSessionId;
+  let selectedDaily = true;
   let chartCurrency = 'credits';
   let iterationGrouping = 'turns';
   function selectTab(tab) {
     activeTab = tab;
     document.querySelectorAll('[data-tab]').forEach((button) => button.setAttribute('aria-selected', String(button.dataset.tab === tab)));
     document.querySelectorAll('[data-panel]').forEach((panel) => { panel.hidden = panel.dataset.panel !== tab; });
+    document.querySelector('.range-toolbar').hidden = tab === 'daily';
+    document.querySelector('.range').hidden = tab === 'daily';
   }
   function render(data) {
     currentData = data;
@@ -188,18 +227,16 @@ function dashboardHtml() {
     const pageCount = Math.max(1, Math.ceil(data.week.sessions.length / PAGE_SIZE));
     sessionPage = Math.min(sessionPage, pageCount - 1);
     const pageSessions = data.week.sessions.slice(sessionPage * PAGE_SIZE, (sessionPage + 1) * PAGE_SIZE);
-    if (!data.week.sessions.some((session) => session.id === selectedSessionId)) selectedSessionId = data.week.sessions[0]?.id;
-    const selected = data.week.sessions.find((session) => session.id === selectedSessionId);
+    const selectedSessions = selectedDaily ? data.today.sessions : data.week.sessions;
+    if (!selectedSessions.some((session) => session.id === selectedSessionId)) selectedSessionId = selectedSessions[0]?.id;
+    const selected = selectedSessions.find((session) => session.id === selectedSessionId);
     const selection = data.week.selection;
     let rangeFields;
     if (selection.mode === 'month') rangeFields = '<label class="range-control">Month<input id="range-month" type="month" value="' + escapeHtml(selection.month) + '"></label>';
     else if (selection.mode === 'custom') rangeFields = '<label class="range-control">Start<input id="range-start" type="date" value="' + escapeHtml(selection.start) + '"></label><label class="range-control">End<input id="range-end" type="date" value="' + escapeHtml(selection.end) + '"></label>';
     else rangeFields = '<button class="range-button" data-week-shift="-7" title="Previous week">←</button><label class="range-control">Week containing<input id="range-anchor" type="date" value="' + escapeHtml(selection.anchor) + '"></label><button class="range-button" data-week-shift="7" title="Next week">→</button>';
     const rangeControls = '<div class="range-toolbar"><label class="range-control">Range<select id="range-mode"><option value="week"' + (selection.mode === 'week' ? ' selected' : '') + '>Week</option><option value="month"' + (selection.mode === 'month' ? ' selected' : '') + '>Month</option><option value="custom"' + (selection.mode === 'custom' ? ' selected' : '') + '>Custom</option></select></label>' + rangeFields + '</div>';
-    const sessionRows = pageSessions.map((session) => {
-      const usage = session.usage;
-      return '<tr><td><button class="session-link" data-session="' + escapeHtml(session.id) + '" title="Open iterations for ' + escapeHtml(session.id) + '">' + escapeHtml(session.id.slice(0, 8)) + '…</button></td><td class="table-title" title="' + escapeHtml(session.title) + '">' + escapeHtml(session.title) + '</td><td>' + escapeHtml(session.model) + '</td><td>' + full(freshInput(usage)) + '</td><td>' + full(usage.cached_tokens) + '</td><td>' + full(usage.output_tokens) + '</td><td>' + full(usage.input_tokens + usage.output_tokens) + '</td><td>' + credits(session.cost?.credits) + '</td><td>' + usd(session.cost?.usd) + '</td><td>' + date(session.timestamp) + ' ' + time(session.timestamp) + '</td></tr>';
-    }).join('');
+    const sessionRows = pageSessions.map(sessionRow).join('');
     const displayedIterations = selected ? (iterationGrouping === 'messages' ? selected.userMessages || [] : selected.iterations) : [];
     const iterationRows = displayedIterations.map((iteration) => {
       const usage = iteration.usage;
@@ -209,7 +246,15 @@ function dashboardHtml() {
     const chart = data.week.daily.map((item) => { const value = item.cost?.[chartCurrency] || 0; const shown = chartCurrency === 'usd' ? usd(value) : credits(value); const height = Math.max(value ? 5 : 2, Math.round(value / max * 100)); const end = item.end || item.date; return '<div class="bar-column ' + (item.date <= today && today <= end ? 'today' : '') + '" title="' + item.date + (end === item.date ? '' : ' – ' + end) + ' · ' + shown + (chartCurrency === 'credits' ? ' credits' : '') + '"><div class="bar-wrap"><div class="bar-measure" style="height:' + height + '%"><span class="bar-value">' + (value ? shown : '') + '</span><div class="bar"></div></div></div><span class="bar-label">' + item.label + '</span></div>'; }).join('');
     const sessionTable = sessionRows ? '<div class="table-wrap"><table><thead><tr><th>Session ID</th><th>Title</th><th>Model</th><th>Fresh</th><th>Cached</th><th>Output</th><th>Total</th><th>Credits</th><th>USD</th><th>Last activity</th></tr></thead><tbody>' + sessionRows + '</tbody></table></div><div class="pagination"><button class="page-button" data-page="' + (sessionPage - 1) + '"' + (sessionPage === 0 ? ' disabled' : '') + '>Previous</button><span>Page ' + (sessionPage + 1) + ' of ' + pageCount + '</span><button class="page-button" data-page="' + (sessionPage + 1) + '"' + (sessionPage + 1 >= pageCount ? ' disabled' : '') + '>Next</button></div>' : '<div class="empty">No token usage recorded in this range.</div>';
     const iterationTable = iterationRows ? '<div class="table-wrap"><table><thead><tr><th>#</th><th>Triggered by</th><th>Context</th><th>Model</th><th>Fresh</th><th>Cached</th><th>Output</th><th>Reasoning</th><th>Total</th><th>Credits</th><th>USD</th><th>Time</th></tr></thead><tbody>' + iterationRows + '</tbody></table></div><div class="iteration-note">One row per Codex <code>last_token_usage</code> event. User/tool context is inferred from transcript order.</div>' : '<div class="empty">' + (selected ? 'No per-call usage was recorded for this session.' : 'Select a session first.') + '</div>';
+    const dailyUsage = data.today.total;
+    const dailySessionRows = data.today.sessions.map(sessionRow).join('');
+    const dailySessionTable = dailySessionRows ? '<div class="table-wrap"><table><thead><tr><th>Session ID</th><th>Title</th><th>Model</th><th>Fresh</th><th>Cached</th><th>Output</th><th>Total</th><th>Credits</th><th>USD</th><th>Last activity</th></tr></thead><tbody>' + dailySessionRows + '</tbody></table></div>' : '<div class="empty">No Codex usage recorded today.</div>';
+    const latest = data.today.latestTurn;
+    const latestValue = (value) => 'today (latest turn: ' + (latest ? value : '—') + ')';
+    const dailyPanel = '<div class="tab-panel" data-panel="daily" role="tabpanel"><div class="range">Today · ' + date(data.today.date) + ' UTC</div><section class="cards">' + metric('Fresh input', freshInput(dailyUsage), latestValue(full(latest && freshInput(latest.usage))), '#4de1d5') + metric('Cached input', dailyUsage.cached_tokens, latestValue(full(latest?.usage.cached_tokens)), '#ef8dca') + metric('Output', dailyUsage.output_tokens, latestValue(full(latest?.usage.output_tokens)), '#a88bff') + metric('Total tokens', dailyUsage.input_tokens + dailyUsage.output_tokens, latestValue(full(latest && latest.usage.input_tokens + latest.usage.output_tokens)), '#ffbd72') + metric('Credits', credits(data.today.cost.credits), latestValue(credits(latest?.cost?.credits)), '#7ed7ff') + metric('USD', usd(data.today.cost.usd), latestValue(usd(latest?.cost?.usd)), '#8fe388') + '</section><section class="sessions"><div class="sessions-head section-title"><span>Active daily sessions</span><span class="muted">' + data.today.sessions.length + '</span></div>' + dailySessionTable + '</section></div>';
     app.innerHTML = '<header class="top"><div><div class="eyebrow">Local telemetry</div><h1>Codex usage</h1><div class="subtle">Your token pulse, without the noise.</div></div><button class="icon-button" aria-label="Refresh usage" title="Refresh" onclick="vscode.postMessage({type:\\'refresh\\'})">↻</button></header><nav class="tabs" role="tablist" aria-label="Usage views"><button class="tab" role="tab" data-tab="overview">Overview</button><button class="tab" role="tab" data-tab="sessions">Sessions (' + data.meta.sessionCount + ')</button><button class="tab" role="tab" data-tab="iterations">Iterations</button></nav>' + rangeControls + '<div class="range">' + date(data.week.start) + ' – ' + date(data.week.end) + ' <span class="muted">· UTC</span></div><div class="tab-panel" data-panel="overview" role="tabpanel"><section class="cards">' + metric('Fresh input', freshInput(total), 'input not served from cache', '#4de1d5') + metric('Output', total.output_tokens, 'assistant tokens', '#a88bff') + metric('Cached input', total.cached_tokens, 'provider cache hits', '#ef8dca') + metric('Reasoning', total.reasoning_tokens, 'inside output', '#ffbd72') + metric('Credits', credits(data.pricing.credits), 'official Codex token rates', '#7ed7ff') + metric('USD', usd(data.pricing.usd), 'standard API rates', '#8fe388') + '</section><section class="chart"><div class="section-title"><span>Activity</span><span class="muted">' + fmt(total.input_tokens + total.output_tokens) + ' total</span></div><div class="chart-scroll"><div class="chart-grid" style="grid-template-columns:repeat(' + data.week.daily.length + ',minmax(28px,1fr))">' + chart + '</div></div></section></div><div class="tab-panel" data-panel="sessions" role="tabpanel"><section class="sessions"><div class="sessions-head section-title"><span>Sessions</span><span class="muted">' + data.meta.sessionCount + '</span></div>' + sessionTable + '</section></div><div class="tab-panel" data-panel="iterations" role="tabpanel"><section class="sessions"><div class="sessions-head section-title"><span>Iterations' + (selected ? ' · ' + escapeHtml(selected.title) : '') + '</span><span class="muted">' + (selected?.iterations?.length || 0) + ' model calls</span></div>' + iterationTable + '</section></div><div class="footer">' + escapeHtml(data.meta.codexHome) + (data.pricing.missingModels.length ? ' · Pricing unavailable for: ' + escapeHtml(data.pricing.missingModels.join(', ')) : '') + (data.meta.malformedFiles ? ' · Some incomplete transcript lines were skipped.' : '') + '</div>';
+    app.querySelector('.tabs').insertAdjacentHTML('afterbegin', '<button class="tab" role="tab" data-tab="daily">Daily</button>');
+    app.querySelector('[data-panel="overview"]').insertAdjacentHTML('beforebegin', dailyPanel);
     app.querySelector('.chart-grid').style.gridTemplateColumns = 'repeat(' + data.week.daily.length + ', minmax(0, 1fr))';
     app.querySelector('.chart .section-title .muted').outerHTML = '<div class="chart-toggle" aria-label="Chart currency"><button data-chart-currency="credits" aria-pressed="' + (chartCurrency === 'credits') + '">Credits</button><button data-chart-currency="usd" aria-pressed="' + (chartCurrency === 'usd') + '">USD</button></div>';
     app.querySelector('[data-panel="iterations"] .section-title .muted').outerHTML = '<div class="chart-toggle" aria-label="Session detail grouping"><button data-iteration-grouping="turns" aria-pressed="' + (iterationGrouping === 'turns') + '">Turns</button><button data-iteration-grouping="messages" aria-pressed="' + (iterationGrouping === 'messages') + '">User messages</button></div>';
@@ -230,7 +275,7 @@ function dashboardHtml() {
       vscode.postMessage({ type: 'range', range: { mode: 'week', anchor: anchor.toISOString().slice(0, 10) } });
     }
     const session = event.target.closest('[data-session]');
-    if (session) { selectedSessionId = session.dataset.session; activeTab = 'iterations'; render(currentData); }
+    if (session) { selectedSessionId = session.dataset.session; selectedDaily = activeTab === 'daily'; activeTab = 'iterations'; render(currentData); }
     const page = event.target.closest('[data-page]');
     if (page && !page.disabled) { sessionPage = Number(page.dataset.page); render(currentData); }
   });
@@ -242,7 +287,7 @@ function dashboardHtml() {
       : mode === 'month' ? { mode, month: document.getElementById('range-month').value } : mode === 'custom' ? { mode, start: document.getElementById('range-start').value, end: document.getElementById('range-end').value } : { mode, anchor: document.getElementById('range-anchor').value };
     if (mode !== 'custom' || range.start && range.end && range.start <= range.end) vscode.postMessage({ type: 'range', range });
   });
-  window.addEventListener('message', (event) => { if (event.data.type === 'progress' && event.data.total) { const percent = Math.round(event.data.completed / event.data.total * 100); const remaining = event.data.total - event.data.completed; document.getElementById('progress-label').textContent = 'Processed ' + event.data.completed + ' · Remaining ' + remaining + ' · Total ' + event.data.total; document.getElementById('progress-count').textContent = event.data.completed + ' / ' + event.data.total + ' (' + percent + '%)'; const bar = document.getElementById('progress-bar'); bar.classList.add('determinate'); bar.style.setProperty('--progress', percent + '%'); bar.setAttribute('aria-valuenow', percent); bar.setAttribute('aria-valuetext', event.data.completed + ' of ' + event.data.total + ' sessions processed'); } if (event.data.type === 'data') render(event.data.data); if (event.data.type === 'error') app.innerHTML = '<div class="error">Could not read Codex usage: ' + escapeHtml(event.data.message) + '</div>'; });
+  window.addEventListener('message', (event) => { if (event.data.type === 'progress' && event.data.total) { const percent = Math.round(event.data.completed / event.data.total * 100); const remaining = event.data.total - event.data.completed; document.getElementById('progress-label').textContent = 'Processed ' + event.data.completed + ' · Remaining ' + remaining + ' · Total ' + event.data.total; document.getElementById('progress-count').textContent = event.data.completed + ' / ' + event.data.total + ' (' + percent + '%)'; const bar = document.getElementById('progress-bar'); bar.classList.add('determinate'); bar.style.setProperty('--progress', percent + '%'); bar.setAttribute('aria-valuenow', percent); bar.setAttribute('aria-valuetext', event.data.completed + ' of ' + event.data.total + ' sessions processed'); } if (event.data.type === 'data') render(event.data.data); if (event.data.type === 'tab') selectTab(event.data.tab); if (event.data.type === 'error') app.innerHTML = '<div class="error">Could not read Codex usage: ' + escapeHtml(event.data.message) + '</div>'; });
   vscode.postMessage({type: 'ready'});
 </script>
 </body>

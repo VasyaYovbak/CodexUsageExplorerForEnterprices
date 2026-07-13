@@ -9,8 +9,11 @@ assert.deepStrictEqual(resolveRates(usd, 'gpt-5.5'), { input: 5, cached: 0.5, ou
 assert.strictEqual(priceUsage({ input_tokens: 1000, cached_tokens: 600, output_tokens: 100 }, { input: 1, cached: 0.1, output: 6 }), 0.00106);
 
 const data = { week: { daily: [{ date: '2026-07-01', end: '2026-07-07' }], sessions: [{ timestamp: '2026-07-03T12:00:00Z', model: 'gpt-5.6-luna', usage: { input_tokens: 9999, cached_tokens: 0, output_tokens: 0 }, iterations: [{ timestamp: '2026-07-03T12:00:00Z', model: 'gpt-5.6-luna', usage: { input_tokens: 1000, cached_tokens: 600, output_tokens: 100 } }] }] } };
+data.today = { sessions: data.week.sessions, latestTurn: data.week.sessions[0].iterations[0] };
 applyPricing(data, { credits, usd, sources: { credits: 'credits', usd: 'usd' } });
 assert.strictEqual(data.pricing.usd, 0.00106);
+assert.strictEqual(data.today.cost.usd, 0.00106);
+assert.strictEqual(data.today.latestTurn.cost.usd, 0.00106);
 assert.strictEqual(data.pricing.credits, 0.0265);
 assert.deepStrictEqual(data.week.daily[0].cost, { usd: 0.00106, credits: 0.0265 });
 console.log('pricing checks passed');

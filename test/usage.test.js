@@ -31,17 +31,18 @@ assert.deepStrictEqual(normalizeUsage({ input_tokens: 10, cached_input_tokens: 4
   ].join('\n'));
   const fixture = await buildUsageData(root, new Date('2026-07-09T12:00:00Z'));
   assert.deepStrictEqual(fixture.week.daily.map(({ label }) => label), ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']);
-  assert.deepStrictEqual(fixture.week.sessions[0].usage, { input_tokens: 22, output_tokens: 4, cached_tokens: 5, reasoning_tokens: 1, cached_writes: null });
+  assert.deepStrictEqual(fixture.week.sessions[0].usage, { input_tokens: 20, output_tokens: 4, cached_tokens: 5, reasoning_tokens: 1, cached_writes: null });
   assert.strictEqual(fixture.week.daily[2].usage.input_tokens, 10);
-  assert.strictEqual(fixture.week.daily[3].usage.input_tokens, 12);
+  assert.strictEqual(fixture.week.daily[3].usage.input_tokens, 10);
   assert.strictEqual(fixture.week.sessions[0].title, 'Fixture chat');
   assert.deepStrictEqual(fixture.week.sessions[0].iterations.map((iteration) => [iteration.trigger, iteration.label, iteration.usage.input_tokens]), [
     ['User message', 'Inspect the project', 10],
-    ['Tool response', 'read_file', 12],
+    ['Tool response', 'read_file', 10],
   ]);
+  assert.deepStrictEqual([fixture.today.total.input_tokens, fixture.today.latestTurn.label, fixture.today.sessions.length], [10, 'read_file', 1]);
   fixture.week.sessions[0].iterations[0].cost = { usd: 0.25, credits: 1 };
   fixture.week.sessions[0].iterations[1].cost = { usd: 0.5, credits: 2 };
-  assert.deepStrictEqual(aggregateIterationsByUserMessage(fixture.week.sessions[0].iterations).map((turn) => [turn.label, turn.usage.input_tokens, turn.cost]), [['Inspect the project', 22, { usd: 0.75, credits: 3 }]]);
+  assert.deepStrictEqual(aggregateIterationsByUserMessage(fixture.week.sessions[0].iterations).map((turn) => [turn.label, turn.usage.input_tokens, turn.cost]), [['Inspect the project', 20, { usd: 0.75, credits: 3 }]]);
   const monthly = await buildUsageData(root, new Date(), undefined, { mode: 'month', month: '2026-07' });
   assert.strictEqual(monthly.week.daily.length, 5);
   assert.deepStrictEqual(monthly.week.daily.map(({ date, end }) => [date, end]), [
@@ -51,13 +52,22 @@ assert.deepStrictEqual(normalizeUsage({ input_tokens: 10, cached_input_tokens: 4
     ['2026-07-22', '2026-07-28'],
     ['2026-07-29', '2026-07-31'],
   ]);
-  assert.strictEqual(monthly.week.daily[1].usage.input_tokens, 22);
+  assert.strictEqual(monthly.week.daily[1].usage.input_tokens, 20);
   assert.strictEqual(monthly.meta.sessionCount, 1);
   const custom = await buildUsageData(root, new Date(), undefined, { mode: 'custom', start: '2026-07-01', end: '2026-07-09' });
   assert.strictEqual(custom.week.daily.length, 2);
   const firstDay = await buildUsageData(root, new Date(), undefined, { mode: 'custom', start: '2026-07-08', end: '2026-07-08' });
   assert.strictEqual(firstDay.week.sessions[0].usage.input_tokens, 10);
+  fs.appendFileSync(path.join(sessionDir, 'rollout-session-1.jsonl'), '\n' + JSON.stringify({ timestamp: '2026-07-09T10:03:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 25, cached_input_tokens: 5, output_tokens: 4 } } } }));
+  assert.strictEqual((await buildUsageData(root, new Date('2026-07-09T12:00:00Z'))).today.total.input_tokens, 15);
+  const secondRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-usage-'));
+  fs.cpSync(root, secondRoot, { recursive: true });
+  const secondSessionDir = sessionDir.replace(root, secondRoot);
+  fs.renameSync(path.join(secondSessionDir, 'rollout-session-1.jsonl'), path.join(secondSessionDir, 'rollout-session-2.jsonl'));
+  for (const file of [path.join(secondRoot, 'session_index.jsonl'), path.join(secondSessionDir, 'rollout-session-2.jsonl')]) fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replaceAll('session-1', 'session-2'));
+  assert.strictEqual((await buildUsageData([root, secondRoot], new Date('2026-07-09T12:00:00Z'))).meta.sessionCount, 2);
   fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(secondRoot, { recursive: true, force: true });
   console.log('usage parser checks passed');
 })().catch((error) => {
   console.error(error);

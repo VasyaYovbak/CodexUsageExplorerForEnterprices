@@ -2,7 +2,7 @@
   "name": "codex-token-usage-for-enterprises",
   "displayName": "Codex Token Usage For Enterprises",
   "description": "A local dashboard for Codex token usage from session transcripts.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "DarkStyle",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -39,7 +39,7 @@
         "codexUsage.codexHome": {
           "type": "string",
           "default": "~/.codex",
-          "description": "Codex data directory containing sessions and archived_sessions."
+          "description": "Additional Codex data directory containing sessions and archived_sessions; configured and available default directories are combined automatically."
         }
       }
     },
