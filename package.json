@@ -1,8 +1,8 @@
 {
   "name": "codex-token-usage-for-enterprises",
   "displayName": "Codex Token Usage For Enterprises",
-  "description": "A local dashboard for Codex token usage from session transcripts.",
-  "version": "0.1.2",
+  "description": "A local dashboard for Codex and OpenCode token usage.",
+  "version": "0.1.3",
   "publisher": "DarkStyle",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -11,7 +11,7 @@
     "url": "https://github.com/VasyaYovbak/CodexUsageExplorerForEnterprices.git"
   },
   "scripts": {
-    "test": "node test/usage.test.js && node test/pricing.test.js"
+    "test": "node test/usage.test.js && node test/pricing.test.js && node test/opencode-usage.test.js"
   },
   "engines": {
     "vscode": "^1.85.0"

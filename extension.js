@@ -1,12 +1,14 @@
 const vscode = require('vscode');
 const { aggregateIterationsByUserMessage, buildUsageData, discoverCodexHomes } = require('./usage');
 const { applyPricing, loadPricing } = require('./pricing');
+const { buildOpenCodeUsageData, clearOpenCodeCache } = require('./opencode-usage');
 
 class UsageViewProvider {
   constructor(context, statusBar) {
     this.context = context;
     this.statusBar = statusBar;
     this.view = undefined;
+    this.source = context.globalState.get('usageSource', 'codex');
   }
 
   showDaily() {
@@ -18,8 +20,19 @@ class UsageViewProvider {
     view.webview.options = { enableScripts: true };
     view.webview.html = dashboardHtml();
     view.webview.onDidReceiveMessage((message) => {
-      if (message.type === 'ready') this.refresh();
-      if (message.type === 'refresh') this.refresh();
+      if (message.type === 'ready') {
+        this.view?.webview.postMessage({ type: 'source', source: this.source });
+        this.refresh();
+      }
+      if (message.type === 'refresh') {
+        if (this.source === 'opencode') clearOpenCodeCache();
+        this.refresh();
+      }
+      if (message.type === 'source' && ['codex', 'opencode'].includes(message.source) && message.source !== this.source) {
+        this.source = message.source;
+        this.context.globalState.update('usageSource', this.source);
+        this.refresh();
+      }
       if (message.type === 'range') {
         this.range = message.range;
         this.refresh();
@@ -37,22 +50,32 @@ class UsageViewProvider {
       return;
     }
     this.refreshing = true;
+    const source = this.source;
     const codexHome = vscode.workspace.getConfiguration('codexUsage').get('codexHome', '~/.codex');
     try {
       this.view?.webview.postMessage({ type: 'progress', completed: 0, total: 0 });
-      const [data, pricing] = await Promise.all([
-        buildUsageData(discoverCodexHomes(codexHome), new Date(), (completed, total) => {
-          this.view?.webview.postMessage({ type: 'progress', completed, total });
-        }, this.range),
-        loadPricing(this.context.globalStorageUri.fsPath),
-      ]);
-      applyPricing(data, pricing);
+      let data;
+      if (source === 'opencode') {
+        data = await buildOpenCodeUsageData(new Date(), this.range);
+      } else {
+        const [codexData, pricing] = await Promise.all([
+          buildUsageData(discoverCodexHomes(codexHome), new Date(), (completed, total) => {
+            this.view?.webview.postMessage({ type: 'progress', completed, total });
+          }, this.range),
+          loadPricing(this.context.globalStorageUri.fsPath),
+        ]);
+        data = applyPricing(codexData, pricing);
+        data.meta.source = 'codex';
+      }
       for (const session of [...data.week.sessions, ...data.today.sessions]) session.userMessages = aggregateIterationsByUserMessage(session.iterations);
+      if (source !== this.source) return;
       const statusNumber = (value) => value == null ? '—' : new Intl.NumberFormat('en-US', { maximumFractionDigits: value < .01 ? 4 : 2 }).format(value);
-      this.statusBar.text = `Codex today: ${statusNumber(data.today.cost.credits)} credits · ${data.today.cost.usd == null ? '—' : `$${statusNumber(data.today.cost.usd)}`}`;
+      this.statusBar.text = source === 'opencode'
+        ? `OpenCode today: ${data.today.cost.usd == null ? '—' : `$${statusNumber(data.today.cost.usd)}`}`
+        : `Codex today: ${statusNumber(data.today.cost.credits)} credits · ${data.today.cost.usd == null ? '—' : `$${statusNumber(data.today.cost.usd)}`}`;
       this.view?.webview.postMessage({ type: 'data', data });
     } catch (error) {
-      this.view?.webview.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+      this.view?.webview.postMessage({ type: 'error', source, message: error instanceof Error ? error.message : String(error) });
     } finally {
       this.refreshing = false;
       if (this.refreshPending) {
@@ -111,9 +134,14 @@ function dashboardHtml() {
   *::-webkit-scrollbar-thumb { border-radius: 8px; background: #46526b; }
   html { min-height: 100%; background: var(--bg); }
   body { min-height: 100vh; margin: 0; padding: 22px 18px 28px; color: var(--text); background: radial-gradient(circle at 80% 0, #26365d 0, transparent 42%) fixed, var(--bg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body[data-source="opencode"] { --bg: #201d1d; --panel: #292525; --panel-2: #342f2f; --text: #fdfcfc; --muted: #9a9898; --line: #4a4444; --cyan: #fab283; --purple: #5c9cf5; --pink: #9d7cd8; background: radial-gradient(circle at 80% 0, #3a302a 0, transparent 42%) fixed, var(--bg); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
   #app { min-height: calc(100vh - 50px); display: flex; flex-direction: column; }
   button { color: inherit; font: inherit; cursor: pointer; }
-  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 22px; }
+  .top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 22px; }
+  .top-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .source-toggle { display: flex; padding: 2px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+  .source-toggle button { padding: 5px 8px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; }
+  .source-toggle button[aria-pressed="true"] { color: var(--text); background: var(--panel-2); }
   .eyebrow { color: var(--cyan); font-size: 10px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
   h1 { margin: 4px 0 4px; font-size: 25px; letter-spacing: -.04em; }
   .subtle, .muted { color: var(--muted); }
@@ -187,6 +215,10 @@ function dashboardHtml() {
   @keyframes scan { from { left: -35%; } to { left: 100%; } }
   .error { margin-bottom: 15px; padding: 11px 12px; border: 1px solid #7b4659; border-radius: 11px; color: #ffb8cc; background: #321d2b; }
   .footer { margin-top: 15px; color: var(--muted); font-size: 10px; text-align: center; }
+  body[data-source="opencode"] .card, body[data-source="opencode"] .chart, body[data-source="opencode"] .sessions { border-radius: 5px; background: #292525; box-shadow: none; }
+  body[data-source="opencode"] .icon-button { border-radius: 5px; background: var(--panel); }
+  body[data-source="opencode"] .dot { background: var(--cyan) !important; box-shadow: 0 0 10px var(--cyan) !important; }
+  body[data-source="opencode"] .card:nth-child(5), body[data-source="opencode"] [data-panel="sessions"] th:nth-child(9), body[data-source="opencode"] [data-panel="sessions"] td:nth-child(9), body[data-source="opencode"] [data-panel="daily"] th:nth-child(9), body[data-source="opencode"] [data-panel="daily"] td:nth-child(9), body[data-source="opencode"] [data-panel="iterations"] th:nth-child(11), body[data-source="opencode"] [data-panel="iterations"] td:nth-child(11) { display: none; }
   @media (min-width: 430px) { body { padding-inline: 24px; } .cards { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); } .breakdown { grid-template-columns: repeat(4, 1fr); } }
 </style>
 </head>
@@ -195,6 +227,7 @@ function dashboardHtml() {
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const app = document.getElementById('app');
+  const showLoading = (source) => { app.innerHTML = '<div class="loading"><div id="progress-label">Reading ' + (source === 'opencode' ? 'OpenCode' : 'Codex') + ' sessions…</div><div id="progress-bar" class="progress" role="progressbar" aria-label="Reading usage sessions"><span id="progress-count" class="progress-count">Loading local cache</span></div><small>Scanning chats and calculating the selected UTC range</small></div>'; };
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
   const fmt = (value) => new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value || 0);
   const full = (value) => new Intl.NumberFormat('en-US').format(value || 0);
@@ -204,7 +237,7 @@ function dashboardHtml() {
   const credits = (value) => value == null ? '—' : value.toFixed(value < .01 ? 4 : 2);
   const metric = (label, value, note, color) => '<div class="card"><div class="card-label"><span>' + label + '</span><span class="dot" style="background:' + color + ';box-shadow:0 0 10px ' + color + '"></span></div><div class="card-value">' + (typeof value === 'string' ? value : fmt(value)) + '</div><div class="card-note">' + note + '</div></div>';
   const freshInput = (usage) => Math.max(0, usage.input_tokens - usage.cached_tokens);
-  const sessionRow = (session) => { const usage = session.usage; return '<tr><td><button class="session-link" data-session="' + escapeHtml(session.id) + '" title="Open iterations for ' + escapeHtml(session.id) + '">' + escapeHtml(session.id.slice(0, 8)) + '…</button></td><td class="table-title" title="' + escapeHtml(session.title) + '">' + escapeHtml(session.title) + '</td><td>' + escapeHtml(session.model) + '</td><td>' + full(freshInput(usage)) + '</td><td>' + full(usage.cached_tokens) + '</td><td>' + full(usage.output_tokens) + '</td><td>' + full(usage.input_tokens + usage.output_tokens) + '</td><td>' + credits(session.cost?.credits) + '</td><td>' + usd(session.cost?.usd) + '</td><td>' + date(session.timestamp) + ' ' + time(session.timestamp) + '</td></tr>'; };
+  const sessionRow = (session) => { const usage = session.usage; return '<tr><td><button class="session-link" data-session="' + escapeHtml(session.id) + '" title="Open iterations for ' + escapeHtml(session.id) + '">' + escapeHtml(session.id.slice(0, 8)) + '…</button></td><td class="table-title" title="' + escapeHtml(session.title) + '">' + escapeHtml(session.title) + '</td><td>' + escapeHtml(session.model) + '</td><td>' + full(freshInput(usage)) + '</td><td>' + full(usage.cached_tokens) + '</td><td>' + full(usage.cached_writes) + '</td><td>' + full(usage.output_tokens) + '</td><td>' + full(usage.input_tokens + usage.output_tokens) + '</td><td>' + credits(session.cost?.credits) + '</td><td>' + usd(session.cost?.usd) + '</td><td>' + date(session.timestamp) + ' ' + time(session.timestamp) + '</td></tr>'; };
   const PAGE_SIZE = 10;
   let activeTab = 'daily';
   let currentData;
@@ -222,6 +255,10 @@ function dashboardHtml() {
   }
   function render(data) {
     currentData = data;
+    const source = data.meta.source || 'codex';
+    const agent = source === 'opencode' ? 'OpenCode' : 'Codex';
+    document.body.dataset.source = source;
+    if (source === 'opencode' && chartCurrency === 'credits') chartCurrency = 'usd';
     const total = data.week.total;
     const max = Math.max(Number.EPSILON, ...data.week.daily.map((item) => item.cost?.[chartCurrency] || 0));
     const pageCount = Math.max(1, Math.ceil(data.week.sessions.length / PAGE_SIZE));
@@ -240,28 +277,41 @@ function dashboardHtml() {
     const displayedIterations = selected ? (iterationGrouping === 'messages' ? selected.userMessages || [] : selected.iterations) : [];
     const iterationRows = displayedIterations.map((iteration) => {
       const usage = iteration.usage;
-      return '<tr><td>' + iteration.index + '</td><td>' + escapeHtml(iteration.trigger) + '</td><td class="table-title" title="' + escapeHtml(iteration.label) + '">' + escapeHtml(iteration.label) + '</td><td>' + escapeHtml(iteration.model) + '</td><td>' + full(freshInput(usage)) + '</td><td>' + full(usage.cached_tokens) + '</td><td>' + full(usage.output_tokens) + '</td><td>' + full(usage.reasoning_tokens) + '</td><td>' + full(usage.input_tokens + usage.output_tokens) + '</td><td>' + credits(iteration.cost?.credits) + '</td><td>' + usd(iteration.cost?.usd) + '</td><td>' + time(iteration.timestamp) + '</td></tr>';
+      return '<tr><td>' + iteration.index + '</td><td>' + escapeHtml(iteration.trigger) + '</td><td class="table-title" title="' + escapeHtml(iteration.label) + '">' + escapeHtml(iteration.label) + '</td><td>' + escapeHtml(iteration.model) + '</td><td>' + full(freshInput(usage)) + '</td><td>' + full(usage.cached_tokens) + '</td><td>' + full(usage.cached_writes) + '</td><td>' + full(usage.output_tokens) + '</td><td>' + full(usage.reasoning_tokens) + '</td><td>' + full(usage.input_tokens + usage.output_tokens) + '</td><td>' + credits(iteration.cost?.credits) + '</td><td>' + usd(iteration.cost?.usd) + '</td><td>' + time(iteration.timestamp) + '</td></tr>';
     }).join('');
     const today = new Date().toISOString().slice(0, 10);
     const chart = data.week.daily.map((item) => { const value = item.cost?.[chartCurrency] || 0; const shown = chartCurrency === 'usd' ? usd(value) : credits(value); const height = Math.max(value ? 5 : 2, Math.round(value / max * 100)); const end = item.end || item.date; return '<div class="bar-column ' + (item.date <= today && today <= end ? 'today' : '') + '" title="' + item.date + (end === item.date ? '' : ' – ' + end) + ' · ' + shown + (chartCurrency === 'credits' ? ' credits' : '') + '"><div class="bar-wrap"><div class="bar-measure" style="height:' + height + '%"><span class="bar-value">' + (value ? shown : '') + '</span><div class="bar"></div></div></div><span class="bar-label">' + item.label + '</span></div>'; }).join('');
-    const sessionTable = sessionRows ? '<div class="table-wrap"><table><thead><tr><th>Session ID</th><th>Title</th><th>Model</th><th>Fresh</th><th>Cached</th><th>Output</th><th>Total</th><th>Credits</th><th>USD</th><th>Last activity</th></tr></thead><tbody>' + sessionRows + '</tbody></table></div><div class="pagination"><button class="page-button" data-page="' + (sessionPage - 1) + '"' + (sessionPage === 0 ? ' disabled' : '') + '>Previous</button><span>Page ' + (sessionPage + 1) + ' of ' + pageCount + '</span><button class="page-button" data-page="' + (sessionPage + 1) + '"' + (sessionPage + 1 >= pageCount ? ' disabled' : '') + '>Next</button></div>' : '<div class="empty">No token usage recorded in this range.</div>';
-    const iterationTable = iterationRows ? '<div class="table-wrap"><table><thead><tr><th>#</th><th>Triggered by</th><th>Context</th><th>Model</th><th>Fresh</th><th>Cached</th><th>Output</th><th>Reasoning</th><th>Total</th><th>Credits</th><th>USD</th><th>Time</th></tr></thead><tbody>' + iterationRows + '</tbody></table></div><div class="iteration-note">One row per Codex <code>last_token_usage</code> event. User/tool context is inferred from transcript order.</div>' : '<div class="empty">' + (selected ? 'No per-call usage was recorded for this session.' : 'Select a session first.') + '</div>';
+    const sessionTable = sessionRows ? '<div class="table-wrap"><table><thead><tr><th>Session ID</th><th>Title</th><th>Model</th><th>Fresh</th><th>Cache read</th><th>Cache write</th><th>Output</th><th>Total</th><th>Credits</th><th>USD</th><th>Last activity</th></tr></thead><tbody>' + sessionRows + '</tbody></table></div><div class="pagination"><button class="page-button" data-page="' + (sessionPage - 1) + '"' + (sessionPage === 0 ? ' disabled' : '') + '>Previous</button><span>Page ' + (sessionPage + 1) + ' of ' + pageCount + '</span><button class="page-button" data-page="' + (sessionPage + 1) + '"' + (sessionPage + 1 >= pageCount ? ' disabled' : '') + '>Next</button></div>' : '<div class="empty">No token usage recorded in this range.</div>';
+    const iterationTable = iterationRows ? '<div class="table-wrap"><table><thead><tr><th>#</th><th>Triggered by</th><th>Context</th><th>Model</th><th>Fresh</th><th>Cache read</th><th>Cache write</th><th>Output</th><th>Reasoning</th><th>Total</th><th>Credits</th><th>USD</th><th>Time</th></tr></thead><tbody>' + iterationRows + '</tbody></table></div><div class="iteration-note">One row per ' + agent + ' model call.</div>' : '<div class="empty">' + (selected ? 'No per-call usage was recorded for this session.' : 'Select a session first.') + '</div>';
     const dailyUsage = data.today.total;
     const dailySessionRows = data.today.sessions.map(sessionRow).join('');
-    const dailySessionTable = dailySessionRows ? '<div class="table-wrap"><table><thead><tr><th>Session ID</th><th>Title</th><th>Model</th><th>Fresh</th><th>Cached</th><th>Output</th><th>Total</th><th>Credits</th><th>USD</th><th>Last activity</th></tr></thead><tbody>' + dailySessionRows + '</tbody></table></div>' : '<div class="empty">No Codex usage recorded today.</div>';
+    const dailySessionTable = dailySessionRows ? '<div class="table-wrap"><table><thead><tr><th>Session ID</th><th>Title</th><th>Model</th><th>Fresh</th><th>Cache read</th><th>Cache write</th><th>Output</th><th>Total</th><th>Credits</th><th>USD</th><th>Last activity</th></tr></thead><tbody>' + dailySessionRows + '</tbody></table></div>' : '<div class="empty">No ' + agent + ' usage recorded today.</div>';
     const latest = data.today.latestTurn;
     const latestValue = (value) => 'today (latest turn: ' + (latest ? value : '—') + ')';
     const dailyPanel = '<div class="tab-panel" data-panel="daily" role="tabpanel"><div class="range">Today · ' + date(data.today.date) + ' UTC</div><section class="cards">' + metric('Fresh input', freshInput(dailyUsage), latestValue(full(latest && freshInput(latest.usage))), '#4de1d5') + metric('Cached input', dailyUsage.cached_tokens, latestValue(full(latest?.usage.cached_tokens)), '#ef8dca') + metric('Output', dailyUsage.output_tokens, latestValue(full(latest?.usage.output_tokens)), '#a88bff') + metric('Total tokens', dailyUsage.input_tokens + dailyUsage.output_tokens, latestValue(full(latest && latest.usage.input_tokens + latest.usage.output_tokens)), '#ffbd72') + metric('Credits', credits(data.today.cost.credits), latestValue(credits(latest?.cost?.credits)), '#7ed7ff') + metric('USD', usd(data.today.cost.usd), latestValue(usd(latest?.cost?.usd)), '#8fe388') + '</section><section class="sessions"><div class="sessions-head section-title"><span>Active daily sessions</span><span class="muted">' + data.today.sessions.length + '</span></div>' + dailySessionTable + '</section></div>';
     app.innerHTML = '<header class="top"><div><div class="eyebrow">Local telemetry</div><h1>Codex usage</h1><div class="subtle">Your token pulse, without the noise.</div></div><button class="icon-button" aria-label="Refresh usage" title="Refresh" onclick="vscode.postMessage({type:\\'refresh\\'})">↻</button></header><nav class="tabs" role="tablist" aria-label="Usage views"><button class="tab" role="tab" data-tab="overview">Overview</button><button class="tab" role="tab" data-tab="sessions">Sessions (' + data.meta.sessionCount + ')</button><button class="tab" role="tab" data-tab="iterations">Iterations</button></nav>' + rangeControls + '<div class="range">' + date(data.week.start) + ' – ' + date(data.week.end) + ' <span class="muted">· UTC</span></div><div class="tab-panel" data-panel="overview" role="tabpanel"><section class="cards">' + metric('Fresh input', freshInput(total), 'input not served from cache', '#4de1d5') + metric('Output', total.output_tokens, 'assistant tokens', '#a88bff') + metric('Cached input', total.cached_tokens, 'provider cache hits', '#ef8dca') + metric('Reasoning', total.reasoning_tokens, 'inside output', '#ffbd72') + metric('Credits', credits(data.pricing.credits), 'official Codex token rates', '#7ed7ff') + metric('USD', usd(data.pricing.usd), 'standard API rates', '#8fe388') + '</section><section class="chart"><div class="section-title"><span>Activity</span><span class="muted">' + fmt(total.input_tokens + total.output_tokens) + ' total</span></div><div class="chart-scroll"><div class="chart-grid" style="grid-template-columns:repeat(' + data.week.daily.length + ',minmax(28px,1fr))">' + chart + '</div></div></section></div><div class="tab-panel" data-panel="sessions" role="tabpanel"><section class="sessions"><div class="sessions-head section-title"><span>Sessions</span><span class="muted">' + data.meta.sessionCount + '</span></div>' + sessionTable + '</section></div><div class="tab-panel" data-panel="iterations" role="tabpanel"><section class="sessions"><div class="sessions-head section-title"><span>Iterations' + (selected ? ' · ' + escapeHtml(selected.title) : '') + '</span><span class="muted">' + (selected?.iterations?.length || 0) + ' model calls</span></div>' + iterationTable + '</section></div><div class="footer">' + escapeHtml(data.meta.codexHome) + (data.pricing.missingModels.length ? ' · Pricing unavailable for: ' + escapeHtml(data.pricing.missingModels.join(', ')) : '') + (data.meta.malformedFiles ? ' · Some incomplete transcript lines were skipped.' : '') + '</div>';
+    app.querySelector('h1').textContent = agent + ' usage';
+    const refreshButton = app.querySelector('.icon-button');
+    const actions = document.createElement('div');
+    actions.className = 'top-actions';
+    refreshButton.before(actions);
+    actions.append(refreshButton);
+    actions.insertAdjacentHTML('afterbegin', '<div class="source-toggle" aria-label="Usage source"><button data-source="codex" aria-pressed="' + (source === 'codex') + '">Codex</button><button data-source="opencode" aria-pressed="' + (source === 'opencode') + '">OpenCode</button></div>');
     app.querySelector('.tabs').insertAdjacentHTML('afterbegin', '<button class="tab" role="tab" data-tab="daily">Daily</button>');
     app.querySelector('[data-panel="overview"]').insertAdjacentHTML('beforebegin', dailyPanel);
+    if (source === 'opencode') {
+      app.querySelector('[data-panel="overview"] .cards').insertAdjacentHTML('beforeend', metric('Cache write', total.cached_writes, 'tokens written to provider cache', '#fab283'));
+      app.querySelector('[data-panel="daily"] .cards').insertAdjacentHTML('beforeend', metric('Cache write', dailyUsage.cached_writes, latestValue(full(latest?.usage.cached_writes)), '#fab283'));
+    }
     app.querySelector('.chart-grid').style.gridTemplateColumns = 'repeat(' + data.week.daily.length + ', minmax(0, 1fr))';
-    app.querySelector('.chart .section-title .muted').outerHTML = '<div class="chart-toggle" aria-label="Chart currency"><button data-chart-currency="credits" aria-pressed="' + (chartCurrency === 'credits') + '">Credits</button><button data-chart-currency="usd" aria-pressed="' + (chartCurrency === 'usd') + '">USD</button></div>';
+    app.querySelector('.chart .section-title .muted').outerHTML = '<div class="chart-toggle" aria-label="Chart currency">' + (source === 'codex' ? '<button data-chart-currency="credits" aria-pressed="' + (chartCurrency === 'credits') + '">Credits</button>' : '') + '<button data-chart-currency="usd" aria-pressed="' + (chartCurrency === 'usd') + '">USD</button></div>';
     app.querySelector('[data-panel="iterations"] .section-title .muted').outerHTML = '<div class="chart-toggle" aria-label="Session detail grouping"><button data-iteration-grouping="turns" aria-pressed="' + (iterationGrouping === 'turns') + '">Turns</button><button data-iteration-grouping="messages" aria-pressed="' + (iterationGrouping === 'messages') + '">User messages</button></div>';
     app.querySelector('.footer').remove();
     selectTab(activeTab);
   }
   document.addEventListener('click', (event) => {
+    const source = event.target.closest('button[data-source]');
+    if (source) { const previous = document.body.dataset.source; document.body.dataset.source = source.dataset.source; showLoading(source.dataset.source); vscode.postMessage({ type: previous === source.dataset.source ? 'refresh' : 'source', source: source.dataset.source }); return; }
     const tab = event.target.closest('[data-tab]');
     if (tab) selectTab(tab.dataset.tab);
     const currency = event.target.closest('[data-chart-currency]');
@@ -288,6 +338,7 @@ function dashboardHtml() {
     if (mode !== 'custom' || range.start && range.end && range.start <= range.end) vscode.postMessage({ type: 'range', range });
   });
   window.addEventListener('message', (event) => { if (event.data.type === 'progress' && event.data.total) { const percent = Math.round(event.data.completed / event.data.total * 100); const remaining = event.data.total - event.data.completed; document.getElementById('progress-label').textContent = 'Processed ' + event.data.completed + ' · Remaining ' + remaining + ' · Total ' + event.data.total; document.getElementById('progress-count').textContent = event.data.completed + ' / ' + event.data.total + ' (' + percent + '%)'; const bar = document.getElementById('progress-bar'); bar.classList.add('determinate'); bar.style.setProperty('--progress', percent + '%'); bar.setAttribute('aria-valuenow', percent); bar.setAttribute('aria-valuetext', event.data.completed + ' of ' + event.data.total + ' sessions processed'); } if (event.data.type === 'data') render(event.data.data); if (event.data.type === 'tab') selectTab(event.data.tab); if (event.data.type === 'error') app.innerHTML = '<div class="error">Could not read Codex usage: ' + escapeHtml(event.data.message) + '</div>'; });
+  window.addEventListener('message', (event) => { if (event.data.type === 'source') { document.body.dataset.source = event.data.source; const label = document.getElementById('progress-label'); if (label) label.textContent = 'Reading ' + (event.data.source === 'opencode' ? 'OpenCode' : 'Codex') + ' sessions…'; } if (event.data.type === 'error') { document.body.dataset.source = event.data.source; app.innerHTML = '<div class="top-actions"><div class="source-toggle" aria-label="Usage source"><button data-source="codex" aria-pressed="' + (event.data.source === 'codex') + '">Codex</button><button data-source="opencode" aria-pressed="' + (event.data.source === 'opencode') + '">OpenCode</button></div></div><div class="error">Could not read ' + (event.data.source === 'opencode' ? 'OpenCode' : 'Codex') + ' usage: ' + escapeHtml(event.data.message) + '</div>'; } });
   vscode.postMessage({type: 'ready'});
 </script>
 </body>

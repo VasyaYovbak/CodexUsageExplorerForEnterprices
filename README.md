@@ -1,6 +1,6 @@
-# Codex Token Usage
+# Codex and OpenCode Token Usage
 
-A local VS Code dashboard for inspecting Codex token usage and estimated costs from session transcripts.
+A local VS Code dashboard for inspecting Codex and OpenCode token usage and estimated costs.
 
 ## Features
 
@@ -12,11 +12,13 @@ A local VS Code dashboard for inspecting Codex token usage and estimated costs f
 - Credit and standard API USD estimates
 - Daily or weekly activity bars with a Credits/USD toggle
 - Local transcript processing with no telemetry collection
+- Codex/OpenCode switch with a dedicated OpenCode theme
 
 ## Requirements
 
 - Desktop VS Code 1.85 or newer
 - Codex session data in `~/.codex`, or another configured directory
+- OpenCode 1.18 or newer on `PATH` to view OpenCode usage
 
 The extension supports Linux, macOS, and Windows. In WSL it combines sessions from the Linux and Windows Codex data directories. A configured WSL UNC directory is likewise combined with the default Windows directory when the extension runs on Windows. Remote SSH and development containers read data from their remote environment.
 
@@ -25,7 +27,7 @@ The extension supports Linux, macOS, and Windows. In WSL it combines sessions fr
 Install a packaged extension from the command line:
 
 ```sh
-code --install-extension codex-token-usage-for-enterprises-0.1.2.vsix
+code --install-extension codex-token-usage-for-enterprises-0.1.3.vsix
 ```
 
 Alternatively, open the Extensions view, select **…**, and choose **Install from VSIX…**.
@@ -46,7 +48,7 @@ The configured directory and any available default Codex directories are loaded 
 
 ## Privacy and pricing
 
-Session transcripts are read and processed locally. The extension fetches public OpenAI pricing pages to calculate estimates and caches those rates locally. Estimates may differ from billed amounts.
+Session data is processed locally. Codex estimates use cached public OpenAI pricing; OpenCode costs come from its local database through `opencode db`. Estimates may differ from billed amounts.
 
 ## Development
 

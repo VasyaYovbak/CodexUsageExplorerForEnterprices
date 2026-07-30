@@ -24,6 +24,7 @@ function normalizeUsage(raw) {
 
 function addUsage(target, source) {
   for (const key of USAGE_KEYS) target[key] += source[key] || 0;
+  if (source.cached_writes != null) target.cached_writes = (target.cached_writes || 0) + source.cached_writes;
   return target;
 }
 
@@ -34,6 +35,7 @@ function emptyUsage() {
 function usageDelta(current, previous = emptyUsage()) {
   const delta = emptyUsage();
   for (const key of USAGE_KEYS) delta[key] = Math.max(0, current[key] - previous[key]);
+  if (current.cached_writes != null) delta.cached_writes = Math.max(0, current.cached_writes - (previous.cached_writes || 0));
   return delta;
 }
 
@@ -318,34 +320,7 @@ function sessionsInRange(sessions, startMs, endMs) {
   }).filter(Boolean).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 }
 
-async function buildUsageData(configuredHome, now = new Date(), onProgress, selection) {
-  const codexHomes = (Array.isArray(configuredHome) ? configuredHome : [configuredHome || '~/.codex']).map(expandHome);
-  const titles = new Map(codexHomes.flatMap((home) => [...loadSessionIndex(home)]));
-  const files = [...new Set(codexHomes.flatMap((home) => [
-    ...walkJsonl(path.join(home, 'sessions')),
-    ...walkJsonl(path.join(home, 'archived_sessions')),
-  ]))];
-  const signatures = new Map(files.map((file) => {
-    const stat = fs.statSync(file);
-    return [file, `${stat.mtimeMs}:${stat.size}`];
-  }));
-  const changedFiles = files.filter((file) => transcriptCache.get(file)?.signature !== signatures.get(file));
-  const changed = new Set(changedFiles);
-  const cachedResults = files.filter((file) => !changed.has(file)).map((file) => transcriptCache.get(file).result);
-  for (const file of transcriptCache.keys()) if (!signatures.has(file)) transcriptCache.delete(file);
-  const parsed = await parseFilesInParallel(changedFiles, titles, onProgress);
-  for (const result of parsed.results) transcriptCache.set(result.file, { signature: signatures.get(result.file), result });
-  parsed.sessions.unshift(...cachedResults.map((result) => result.session).filter(Boolean));
-  parsed.malformedFiles += cachedResults.filter((result) => result.error).length;
-  const byId = new Map();
-  for (const session of parsed.sessions) {
-    if (titles.has(session.id)) session.title = titles.get(session.id);
-    if (session.malformedLines) parsed.malformedFiles += 1;
-    const previous = byId.get(session.id);
-    if (!previous || new Date(session.timestamp) > new Date(previous.timestamp)) byId.set(session.id, session);
-  }
-
-  const sessions = [...byId.values()];
+function summarizeSessions(sessions, now = new Date(), selection, meta = {}) {
   const { startMs, endMs, selection: normalizedSelection } = resolveRange(now, selection);
   const rangeSessions = sessionsInRange(sessions, startMs, endMs);
   const rangeTotal = emptyUsage();
@@ -390,8 +365,38 @@ async function buildUsageData(configuredHome, now = new Date(), onProgress, sele
       daily,
       sessions: rangeSessions,
     },
-    meta: { codexHome: codexHomes[0], codexHomes, sessionCount: rangeSessions.length, malformedFiles: parsed.malformedFiles },
+    meta: { ...meta, sessionCount: rangeSessions.length },
   };
 }
 
-module.exports = { aggregateIterationsByUserMessage, buildUsageData, discoverCodexHomes, mondayUtc, normalizeUsage, parseTranscript, resolveRange };
+async function buildUsageData(configuredHome, now = new Date(), onProgress, selection) {
+  const codexHomes = (Array.isArray(configuredHome) ? configuredHome : [configuredHome || '~/.codex']).map(expandHome);
+  const titles = new Map(codexHomes.flatMap((home) => [...loadSessionIndex(home)]));
+  const files = [...new Set(codexHomes.flatMap((home) => [
+    ...walkJsonl(path.join(home, 'sessions')),
+    ...walkJsonl(path.join(home, 'archived_sessions')),
+  ]))];
+  const signatures = new Map(files.map((file) => {
+    const stat = fs.statSync(file);
+    return [file, `${stat.mtimeMs}:${stat.size}`];
+  }));
+  const changedFiles = files.filter((file) => transcriptCache.get(file)?.signature !== signatures.get(file));
+  const changed = new Set(changedFiles);
+  const cachedResults = files.filter((file) => !changed.has(file)).map((file) => transcriptCache.get(file).result);
+  for (const file of transcriptCache.keys()) if (!signatures.has(file)) transcriptCache.delete(file);
+  const parsed = await parseFilesInParallel(changedFiles, titles, onProgress);
+  for (const result of parsed.results) transcriptCache.set(result.file, { signature: signatures.get(result.file), result });
+  parsed.sessions.unshift(...cachedResults.map((result) => result.session).filter(Boolean));
+  parsed.malformedFiles += cachedResults.filter((result) => result.error).length;
+  const byId = new Map();
+  for (const session of parsed.sessions) {
+    if (titles.has(session.id)) session.title = titles.get(session.id);
+    if (session.malformedLines) parsed.malformedFiles += 1;
+    const previous = byId.get(session.id);
+    if (!previous || new Date(session.timestamp) > new Date(previous.timestamp)) byId.set(session.id, session);
+  }
+
+  return summarizeSessions([...byId.values()], now, selection, { codexHome: codexHomes[0], codexHomes, malformedFiles: parsed.malformedFiles });
+}
+
+module.exports = { aggregateIterationsByUserMessage, buildUsageData, discoverCodexHomes, mondayUtc, normalizeUsage, parseTranscript, resolveRange, summarizeSessions };
