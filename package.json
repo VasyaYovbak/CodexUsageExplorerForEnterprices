@@ -2,7 +2,7 @@
   "name": "codex-token-usage-for-enterprises",
   "displayName": "Codex Token Usage For Enterprises",
   "description": "A local dashboard for Codex and OpenCode token usage.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "DarkStyle",
   "icon": "media/icon.png",
   "license": "MIT",

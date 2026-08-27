@@ -1,7 +1,7 @@
 const assert = require('assert');
 const { applyPricing, parseCreditRates, parseUsdRates, priceUsage, resolveRates } = require('../pricing');
 
-const credits = parseCreditRates('<h2>Codex rate card - token-based pricing</h2><p>Credits per 1M tokens</p><table><tr><td>GPT-5.6 Luna</td><td>25 credits</td><td>2.50 credits</td><td>150 credits</td></tr></table><h2>Legacy rate card</h2>');
+const credits = parseCreditRates('<h2>ChatGPT Work and Codex</h2><p>Credits per 1M input tokens, cached input tokens, and output tokens</p><table><tr><td>GPT-5.6 Luna</td><td>25 credits</td><td>2.50 credits</td><td>150 credits</td></tr></table><h2>Legacy rates</h2>');
 const usd = parseUsdRates('<div>Standard</div><table><tr><th>Model</th><th>Input</th><th>Cached input</th><th>Cache writes</th><th>Output</th></tr><tr><td>gpt-5.6-luna</td><td>$1.00</td><td>$0.10</td><td>$1.25</td><td>$6.00</td></tr><tr><td>gpt-5.5</td><td>$5.00</td><td>$0.50</td><td>-</td><td>$30.00</td></tr></table><div>Batch</div>');
 
 assert.deepStrictEqual(resolveRates(credits, 'gpt-5.6-luna'), { input: 25, cached: 2.5, output: 150 });

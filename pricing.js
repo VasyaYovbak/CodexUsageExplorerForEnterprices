@@ -34,11 +34,11 @@ function normalizeModel(value) {
 
 function parseCreditRates(html) {
   const lines = htmlToText(html);
-  const start = lines.findIndex((line) => /credits per 1m tokens/i.test(line));
+  const start = lines.findIndex((line) => /credits per 1m (?:input )?tokens/i.test(line));
   if (start < 0) return new Map();
   const rates = new Map();
   for (const line of lines.slice(start)) {
-    if (/^(legacy rate card|feature availability|frequently asked questions)$/i.test(line)) break;
+    if (/^(legacy rate card|legacy rates|feature availability|frequently asked questions)$/i.test(line)) break;
     if (/research preview/i.test(line)) continue;
     const values = [...line.matchAll(/([\d,]+(?:\.\d+)?)\s+credits?/gi)];
     if (values.length < 3) continue;

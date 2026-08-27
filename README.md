@@ -27,7 +27,7 @@ The extension supports Linux, macOS, and Windows. In WSL it combines sessions fr
 Install a packaged extension from the command line:
 
 ```sh
-code --install-extension codex-token-usage-for-enterprises-0.1.3.vsix
+code --install-extension codex-token-usage-for-enterprises-0.1.4.vsix
 ```
 
 Alternatively, open the Extensions view, select **…**, and choose **Install from VSIX…**.
